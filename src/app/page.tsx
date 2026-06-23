@@ -237,16 +237,26 @@ function generateBigWord(
   const out: string[] = []
 
   if (preventTruncation) {
-    // 防截断模式：以空格分割素材为"词"，每个词不可被截断
-    // 若当前行剩余暗像素不足以放下整个词，则用空格填充剩余暗像素，词在下一行开始
+    // 防截断模式：以空格分割素材为"词"，词之间插入空格分隔符
+    // 每个"词"不可被截断；词与词之间用一个空格分隔（空格也占一个暗像素位）
     const words = source.split(/\s+/).filter((w) => w.length > 0).map((w) => [...w])
     if (words.length === 0) return ""
 
-    let wordIdx = 0
-    let charInWord = 0 // 当前词内已放置的字符偏移（用于超长词跨行续接）
+    // 构建令牌流：word1, space, word2, space, word3, ...
+    // 空格令牌占 1 个暗像素，作为词间分隔
+    interface Token { chars: string[]; isSpace: boolean }
+    const tokens: Token[] = []
+    for (let i = 0; i < words.length; i++) {
+      tokens.push({ chars: words[i], isSpace: false })
+      if (i < words.length - 1) {
+        tokens.push({ chars: [" "], isSpace: true })
+      }
+    }
+
+    let tokenIdx = 0
+    let charInToken = 0
 
     for (let r = 0; r < rows; r++) {
-      // 收集本行所有暗像素列号
       const darkCols: number[] = []
       for (let c = 0; c < cols; c++) {
         if (darkGrid[r][c]) darkCols.push(c)
@@ -256,33 +266,33 @@ function generateBigWord(
       let darkPtr = 0
 
       while (darkPtr < darkCols.length) {
-        if (wordIdx >= words.length) {
-          wordIdx = 0
-          charInWord = 0
+        if (tokenIdx >= tokens.length) {
+          tokenIdx = 0
+          charInToken = 0
         }
 
-        const word = words[wordIdx]
-        const remainingWord = word.length - charInWord
+        const token = tokens[tokenIdx]
+        const remainingToken = token.chars.length - charInToken
         const remainingDark = darkCols.length - darkPtr
 
-        if (remainingWord <= remainingDark) {
-          // 词可以完整放入当前行剩余暗像素
-          for (let i = 0; i < remainingWord; i++) {
-            rowChars[darkCols[darkPtr]] = word[charInWord + i]
+        if (remainingToken <= remainingDark) {
+          // 令牌可以完整放入当前行剩余暗像素
+          for (let i = 0; i < remainingToken; i++) {
+            rowChars[darkCols[darkPtr]] = token.chars[charInToken + i]
             darkPtr++
           }
-          wordIdx++
-          charInWord = 0
-        } else if (remainingWord > darkCols.length) {
-          // 词比整行暗像素还长——无法不截断，强制跨行续接
+          tokenIdx++
+          charInToken = 0
+        } else if (remainingToken > darkCols.length) {
+          // 令牌比整行暗像素还长——强制跨行续接
           for (let i = 0; i < remainingDark; i++) {
-            rowChars[darkCols[darkPtr]] = word[charInWord + i]
+            rowChars[darkCols[darkPtr]] = token.chars[charInToken + i]
             darkPtr++
           }
-          charInWord += remainingDark
-          break // 去下一行继续
+          charInToken += remainingDark
+          break
         } else {
-          // 词能放入完整行但放不进剩余空间——填充空格，词移至下一行
+          // 令牌能放入完整行但放不进剩余空间——填充空格，令牌移至下一行
           break
         }
       }
