@@ -129,47 +129,18 @@ function containsCJK(text: string): boolean {
 }
 
 /* ============================================================
-   Character width classification
-   CJK glyphs & fullwidth ASCII → 2 cells (fullwidth)
-   Halfwidth ASCII & space → 1 cell (halfwidth)
-   ============================================================ */
-
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-function isCJKChar(ch: string): boolean {
-  const code = ch.codePointAt(0)
-  if (code === undefined) return false
-  return isCJKCodePoint(code)
-}
-
-function isFullwidthChar(ch: string): boolean {
-  const code = ch.codePointAt(0)
-  if (code === undefined) return false
-  // CJK unified, Hangul, etc.
-  if (isCJKCodePoint(code)) return true
-  // Fullwidth ASCII forms (U+FF01..U+FF5E)
-  if (code >= 0xFF01 && code <= 0xFF5E) return true
-  // Fullwidth space
-  if (code === 0x3000) return true
-  return false
-}
-
-// Returns width in half-width cells: fullwidth = 2, halfwidth = 1
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-function charCellWidth(ch: string): number {
-  return isFullwidthChar(ch) ? 2 : 1
-}
-
-/* ============================================================
    Fullwidth conversion — when source contains CJK, convert all
-   half-width ASCII (letters, digits, punctuation) to their fullwidth
-   equivalents so they share the same width as CJK glyphs.
-   Space stays as a half-width separator.
+   half-width ASCII (letters, digits, punctuation, space) to their
+   fullwidth equivalents so every character has identical width.
+   This is what makes mixed CJK+English+numbers align perfectly.
    ============================================================ */
 
 function toFullwidth(ch: string): string {
   const code = ch.codePointAt(0)
   if (code === undefined) return ch
-  if (code === 0x20) return " " // space stays half-width
+  // Space → ideographic space (U+3000)
+  if (code === 0x20) return "\u3000"
+  // ASCII printable (0x21..0x7E) → fullwidth (U+FF01..U+FF5E)
   if (code >= 0x21 && code <= 0x7e) {
     return String.fromCodePoint(code + 0xfee0)
   }
@@ -177,23 +148,19 @@ function toFullwidth(ch: string): string {
 }
 
 /* ============================================================
-   Cell metrics
-   CJK mode:  cell = half-width. charAspect = 2.0 (cellH = 2×cellW)
-              Fullwidth chars occupy 2 cells, halfwidth (space) = 1 cell.
-   ASCII mode: cell = 'M' width. charAspect = 100/asciiW.
+   Cell metrics — measure actual character width of the chosen
+   source font. If source contains CJK, measure a CJK glyph
+   (which is full-width / square) and use ideographic space
+   (U+3000) for empty cells so every cell has identical width.
    ============================================================ */
 
 interface CellMetrics {
   charAspect: number  // cellH / cellW
-  emptyChar: string
-  // CJK 模式: spaceCells = 全角字符占多少个空格的渲染宽度
-  // 实测空格可能远窄于半角，需要动态测量
-  spaceCells: number  // 一个空格占多少个采样cell
-  fullCells: number   // 一个全角字符占多少个采样cell
+  emptyChar: string   // " " for ASCII, "\u3000" for CJK
 }
 
 function measureCellMetrics(fontStack: string, hasCJK: boolean): CellMetrics {
-  const fallback: CellMetrics = { charAspect: 1.0, emptyChar: " ", spaceCells: 1, fullCells: 1 }
+  const fallback: CellMetrics = { charAspect: 1.0, emptyChar: " " }
   if (typeof window === "undefined") return fallback
   try {
     const probe = document.createElement("span")
@@ -204,29 +171,20 @@ function measureCellMetrics(fontStack: string, hasCJK: boolean): CellMetrics {
     document.body.appendChild(probe)
 
     if (hasCJK) {
-      // 测量全角字符（中文）和空格的实际渲染宽度
+      // Measure a CJK character — it's full-width (square-ish).
+      // All source chars will be converted to fullwidth, so they share this width.
       probe.textContent = "\u5b57"
       const cjkW = probe.getBoundingClientRect().width
-      probe.textContent = " "
-      const spaceW = probe.getBoundingClientRect().width
       document.body.removeChild(probe)
-      if (!cjkW || !isFinite(cjkW)) {
-        return { charAspect: 2.0, emptyChar: " ", spaceCells: 1, fullCells: 2 }
-      }
-
-      // 以空格宽度为 1 个 cell（最小单位）
-      // 全角字符占 round(cjkW / spaceW) 个 cell
-      const sCells = 1
-      const fCells = Math.max(1, Math.round(cjkW / (spaceW || cjkW / 2)))
-      // charAspect: cellH / cellW. cellW = spaceW, cellH ≈ cjkW (CJK方形)
-      const charAspect = cjkW / (spaceW || cjkW / 2)
-      return { charAspect, emptyChar: " ", spaceCells: sCells, fullCells: fCells }
+      if (!cjkW || !isFinite(cjkW)) return { charAspect: 1.0, emptyChar: "\u3000" }
+      return { charAspect: 100 / cjkW, emptyChar: "\u3000" }
     } else {
+      // Pure ASCII — measure 'M' in the source font
       probe.textContent = "M"
       const asciiW = probe.getBoundingClientRect().width
       document.body.removeChild(probe)
       if (!asciiW || !isFinite(asciiW)) return fallback
-      return { charAspect: 100 / asciiW, emptyChar: " ", spaceCells: 1, fullCells: 1 }
+      return { charAspect: 100 / asciiW, emptyChar: " " }
     }
   } catch {
     return fallback
@@ -276,11 +234,9 @@ function generateBigWord(
 
   const img = ctx.getImageData(0, 0, canvas.width, canvas.height).data
 
-  // CJK 模式: cell = 空格渲染宽, cols 按空格宽度细分
-  // 全角字符占 metrics.fullCells 个 cell, 空格占 metrics.spaceCells 个 cell
-  // ASCII 模式: cell = 'M' 宽, 所有字符占 1 cell
-  const baseCols = Math.max(8, Math.round(baseFont * 0.375))
-  const cols = hasCJK ? baseCols * metrics.fullCells : baseCols
+  // 列数由目标字号决定（密度冗余，已移除）
+  // baseFont=320 → cols=120（与之前默认值一致）
+  const cols = Math.max(8, Math.round(baseFont * 0.375))
   const cellW = canvas.width / cols
   const cellH = cellW * metrics.charAspect
   const rows = Math.ceil(canvas.height / cellH)
@@ -302,115 +258,79 @@ function generateBigWord(
     darkGrid.push(row)
   }
 
-  // 准备素材字符：CJK 模式下转换为全角
+  // 准备素材字符：CJK 模式下转换为全角，保证每个字符等宽
   const convertChar = (ch: string): string => hasCJK ? toFullwidth(ch) : ch
-
-  // 计算字符占用的 cell 数
-  const cellStep = (ch: string): number => {
-    if (!hasCJK) return 1
-    if (ch === " " || ch === "\u3000") return metrics.spaceCells
-    return metrics.fullCells
-  }
+  const spaceChar = hasCJK ? "\u3000" : " "
 
   const out: string[] = []
 
   if (preventTruncation) {
-    // 防截断模式：以空格分割素材为"词"，每个词尽量完整放入连续暗像素段。
-    // 对于过短段（撇捺等斜线的细片段），回退到逐字符填充，保证斜线连续不弯曲。
+    // 防截断模式：以空格分割素材为"词"
+    // 规则：
+    //   1. 每个词必须完整输出，不可截断
+    //   2. 词与词之间至少 1 个空格（循环边界也补充空格）
+    //   3. 空格个数可根据渲染需要调整（行尾填空格对齐）
     const words = source.split(/\s+/).filter((w) => w.length > 0)
     if (words.length === 0) return ""
 
-    const wordTokens = words.map((w) => {
-      const chars = [...w].map(convertChar)
-      return { chars, cellLen: chars.reduce((sum, ch) => sum + cellStep(ch), 0) }
-    })
+    // 将每个词转为字符数组（CJK 模式下转全角）
+    const wordChars: string[][] = words.map((w) => [...w].map(convertChar))
+    const spaceToken = spaceChar // 词间分隔符（1 个空格单元）
 
-    // 找出一行中的连续暗像素段
-    const findSegments = (row: boolean[]): number[][] => {
-      const segs: number[][] = []
-      let cur: number[] = []
-      for (let c = 0; c < row.length; c++) {
-        if (row[c]) {
-          cur.push(c)
-        } else if (cur.length > 0) {
-          segs.push(cur)
-          cur = []
-        }
+    // 令牌流：word1, space, word2, space, ..., wordN, space, word1, space, ...
+    // 注意：最后一个词后面也有 space，保证循环边界有空格分隔
+    interface Token { chars: string[]; isSpace: boolean }
+    const buildTokens = (): Token[] => {
+      const ts: Token[] = []
+      for (let i = 0; i < wordChars.length; i++) {
+        ts.push({ chars: wordChars[i], isSpace: false })
+        ts.push({ chars: [spaceToken], isSpace: true })
       }
-      if (cur.length > 0) segs.push(cur)
-      return segs
+      return ts
     }
+    const tokens = buildTokens()
 
-    // 合并相距很近的段——斜线笔画常有 1-2 cell 的采样间隙，合并后可容纳完整词
-    const mergeGap = Math.max(1, metrics.fullCells)
-    const mergeSegments = (segs: number[][]): number[][] => {
-      if (segs.length <= 1) return segs
-      const result: number[][] = [segs[0].slice()]
-      for (let i = 1; i < segs.length; i++) {
-        const prev = result[result.length - 1]
-        const gap = segs[i][0] - prev[prev.length - 1] - 1
-        if (gap > 0 && gap <= mergeGap) {
-          for (let c = prev[prev.length - 1] + 1; c < segs[i][0]; c++) prev.push(c)
-          for (const c of segs[i]) prev.push(c)
-        } else {
-          result.push(segs[i].slice())
-        }
-      }
-      return result
-    }
-
-    // 将字符放入 rowChars，使用实际列索引；全角字符覆盖的额外 cell 设为占位 ""
-    const placeChar = (rowChars: string[], col: number, ch: string): number => {
-      const step = cellStep(ch)
-      rowChars[col] = ch
-      for (let s = 1; s < step && col + s < cols; s++) {
-        rowChars[col + s] = "" // 占位，join 时被吸收，保证全角视觉宽度正确
-      }
-      return step
-    }
-
-    let wordIdx = 0
-    // 回退用的扁平字符流（逐字符填充短段）
-    const flatSrc = [...source].map(convertChar)
-    let flatIdx = 0
+    let tokenIdx = 0
+    let charInToken = 0
 
     for (let r = 0; r < rows; r++) {
-      const rawSegs = findSegments(darkGrid[r])
-      const segments = mergeSegments(rawSegs)
+      const darkCols: number[] = []
+      for (let c = 0; c < cols; c++) {
+        if (darkGrid[r][c]) darkCols.push(c)
+      }
+
       const rowChars: string[] = new Array(cols).fill(metrics.emptyChar)
+      let darkPtr = 0
 
-      for (const seg of segments) {
-        let segPtr = 0
-
-        // Pass 1: 尝试放入完整的词（词内字符连续，不跨段）
-        while (segPtr < seg.length) {
-          const remaining = seg.length - segPtr
-          // 在词列表中找第一个能放入剩余段的词
-          let bestOffset = -1
-          for (let offset = 0; offset < wordTokens.length; offset++) {
-            if (wordTokens[(wordIdx + offset) % wordTokens.length].cellLen <= remaining) {
-              bestOffset = offset
-              break
-            }
-          }
-          if (bestOffset < 0) break // 没有词能放下，转 Pass 2
-
-          wordIdx += bestOffset
-          const word = wordTokens[wordIdx % wordTokens.length]
-          let ptr = segPtr
-          for (const ch of word.chars) {
-            ptr += placeChar(rowChars, seg[ptr], ch)
-          }
-          segPtr = ptr
-          wordIdx++
+      while (darkPtr < darkCols.length) {
+        if (tokenIdx >= tokens.length) {
+          tokenIdx = 0
+          charInToken = 0
         }
 
-        // Pass 2: 段内剩余位置用单个字符填充（保证撇捺等斜线连续不弯曲）
-        while (segPtr < seg.length) {
-          const ch = flatSrc[flatIdx % flatSrc.length]
-          const step = placeChar(rowChars, seg[segPtr], ch)
-          segPtr += step
-          flatIdx++
+        const token = tokens[tokenIdx]
+        const remainingToken = token.chars.length - charInToken
+        const remainingDark = darkCols.length - darkPtr
+
+        if (remainingToken <= remainingDark) {
+          // 令牌完整放入当前行剩余暗像素
+          for (let i = 0; i < remainingToken; i++) {
+            rowChars[darkCols[darkPtr]] = token.chars[charInToken + i]
+            darkPtr++
+          }
+          tokenIdx++
+          charInToken = 0
+        } else if (remainingToken > darkCols.length) {
+          // 令牌比整行暗像素还长——强制跨行续接
+          for (let i = 0; i < remainingDark; i++) {
+            rowChars[darkCols[darkPtr]] = token.chars[charInToken + i]
+            darkPtr++
+          }
+          charInToken += remainingDark
+          break
+        } else {
+          // 令牌能放入完整行但放不进剩余空间——填充空格，令牌移至下一行
+          break
         }
       }
 
@@ -418,25 +338,16 @@ function generateBigWord(
     }
   } else {
     // 普通模式：逐字符循环填充
-    // CJK 模式下，全角字符占 2 cell，半角占 1 cell
     const src = [...source].map(convertChar)
     let idx = 0
     for (let r = 0; r < rows; r++) {
-      const rowChars: string[] = new Array(cols).fill(metrics.emptyChar)
-      let c = 0
-      while (c < cols) {
+      const rowChars: string[] = []
+      for (let c = 0; c < cols; c++) {
         if (darkGrid[r][c]) {
-          const ch = src[idx % src.length]
+          rowChars.push(src[idx % src.length])
           idx++
-          const step = cellStep(ch)
-          rowChars[c] = ch
-          // 全角字符覆盖的额外 cell 设为空占位（join 时占 0 字符）
-          for (let s = 1; s < step && c + s < cols; s++) {
-            rowChars[c + s] = ""
-          }
-          c += step
         } else {
-          c++ // 空白 cell，已填充 emptyChar
+          rowChars.push(metrics.emptyChar)
         }
       }
       out.push(rowChars.join("").replace(/[\s\u3000]+$/, ""))
@@ -684,8 +595,8 @@ function FontPicker({
 export default function Home() {
   const [source, setSource] = useState("鳖鳖")
   const [target, setTarget] = useState("赖疙宝")
-  const [fontSize, setFontSize] = useState(7)
-  const [targetFontSize, setTargetFontSize] = useState(600)
+  const [fontSize, setFontSize] = useState(10)
+  const [targetFontSize, setTargetFontSize] = useState(320)
   const [targetFontId, setTargetFontId] = useState("yahei")
   const [sourceFontId, setSourceFontId] = useState("yahei")
   const [textColor, setTextColor] = useState("#818cf8")
@@ -822,23 +733,14 @@ export default function Home() {
     const text = tab === "edge" ? edgeResult?.art ?? "" : art
     if (!text) return
     const lines = text.split("\n")
-
-    // 计算每行的视觉宽度（cell 数）
-    const lineWidth = (line: string): number =>
-      [...line].reduce((sum, ch) => {
-        if (!hasCJK) return sum + 1
-        if (ch === " " || ch === "\u3000") return sum + cellMetrics.spaceCells
-        return sum + cellMetrics.fullCells
-      }, 0)
-    const maxCols = Math.max(...lines.map(lineWidth))
+    const maxCols = Math.max(...lines.map((l) => [...l].length))
     if (maxCols === 0) return
 
-    // 高清导出：渲染分辨率为显示尺寸的 4 倍
-    const SCALE = 4
-    const lineH = fontSize * SCALE
-    // charW = 一个 cell 的渲染宽度 = fontSize / charAspect
-    const charW = (cellMetrics.charAspect ? fontSize / cellMetrics.charAspect : fontSize * 0.6) * SCALE
-    const padding = 24 * SCALE
+    // Render to an offscreen canvas
+    const lineH = fontSize * 1.0
+    // charAspect = cellH/cellW, so charW = fontSize / charAspect
+    const charW = cellMetrics.charAspect ? fontSize / cellMetrics.charAspect : fontSize * 0.6
+    const padding = 24
     const canvas = document.createElement("canvas")
     canvas.width = Math.ceil(maxCols * charW + padding * 2)
     canvas.height = Math.ceil(lines.length * lineH + padding * 2)
@@ -849,21 +751,16 @@ export default function Home() {
     ctx.fillStyle = bgColor
     ctx.fillRect(0, 0, canvas.width, canvas.height)
 
-    // Text — 按字符实际 cell 数推进 x 坐标
+    // Text
     ctx.fillStyle = textColor
-    ctx.font = `700 ${fontSize * SCALE}px ${sourceFont.stack}`
+    ctx.font = `700 ${fontSize}px ${sourceFont.stack}`
     ctx.textBaseline = "top"
     ctx.textAlign = "left"
     lines.forEach((line, i) => {
-      let x = padding
-      for (const ch of [...line]) {
-        ctx.fillText(ch, x, padding + i * lineH)
-        let step = 1
-        if (hasCJK) {
-          step = (ch === " " || ch === "\u3000") ? cellMetrics.spaceCells : cellMetrics.fullCells
-        }
-        x += charW * step
-      }
+      const chars = [...line]
+      chars.forEach((ch, j) => {
+        ctx.fillText(ch, padding + j * charW, padding + i * lineH)
+      })
     })
 
     canvas.toBlob((blob) => {
@@ -886,8 +783,8 @@ export default function Home() {
   const handleReset = () => {
     setSource("鳖鳖")
     setTarget("赖疙宝")
-    setFontSize(7)
-    setTargetFontSize(600)
+    setFontSize(10)
+    setTargetFontSize(320)
     setTargetFontId("yahei")
     setSourceFontId("yahei")
     setTextColor("#818cf8")
@@ -1113,7 +1010,7 @@ export default function Home() {
                 <input
                   type="range"
                   min={80}
-                  max={2000}
+                  max={600}
                   step={10}
                   value={targetFontSize}
                   onChange={(e) => setTargetFontSize(Number(e.target.value))}
