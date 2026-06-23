@@ -84,27 +84,19 @@ const BUILTIN_FONTS: FontDef[] = [
 ]
 
 const TEXT_COLORS = [
-  { id: "slate", value: "#e2e8f0" },
-  { id: "indigo", value: "#818cf8" },
+  { id: "white", value: "#ffffff" },
+  { id: "amber", value: "#fbbf24" },
   { id: "sky", value: "#38bdf8" },
   { id: "emerald", value: "#34d399" },
-  { id: "amber", value: "#fbbf24" },
-  { id: "orange", value: "#fb923c" },
   { id: "pink", value: "#f472b6" },
-  { id: "violet", value: "#a78bfa" },
-  { id: "rose", value: "#fb7185" },
-  { id: "lime", value: "#a3e635" },
 ]
 
 const BG_COLORS = [
   { id: "slate-900", value: "#0f172a" },
   { id: "black", value: "#000000" },
-  { id: "slate-800", value: "#1e293b" },
   { id: "indigo-950", value: "#1e1b4b" },
   { id: "emerald-950", value: "#022c22" },
-  { id: "rose-950", value: "#4c0519" },
   { id: "white", value: "#ffffff" },
-  { id: "slate-100", value: "#f1f5f9" },
 ]
 
 const PRESETS: { source: string; target: string; label: string; font: string; sourceFont?: string }[] = []
@@ -187,7 +179,8 @@ function generateBigWord(
   metrics: CellMetrics,
   targetBaseSize: number,
 ): string {
-  const src = [...source.replace(/\s+/g, "")]
+  // 保留素材中的所有字符（含空格），仅过滤纯空白行末尾
+  const src = [...source]
   const tgt = target
   if (src.length === 0 || tgt.trim().length === 0) return ""
 
@@ -217,7 +210,11 @@ function generateBigWord(
   lines.forEach((l, i) => ctx.fillText(l, padding, padding + (i + 0.5) * lineH))
 
   const img = ctx.getImageData(0, 0, canvas.width, canvas.height).data
-  const cols = Math.max(8, Math.round(density))
+
+  // 目标字号影响输出大小：以 320 为基准缩放列数，
+  // 这样目标字号越大 → 采样列数越多 → 拼出的大字整体越大
+  const scaleFactor = baseFont / 320
+  const cols = Math.max(8, Math.round(density * scaleFactor))
   const cellW = canvas.width / cols
   const cellH = cellW * metrics.charAspect
   const rows = Math.ceil(canvas.height / cellH)
@@ -235,6 +232,7 @@ function generateBigWord(
         bright = (img[p] + img[p + 1] + img[p + 2]) / 3
       }
       if (bright < 140) {
+        // 循环使用：素材完全用完一遍后（idx 达到 src.length）才回到开头
         rowChars.push(src[idx % src.length])
         idx++
       } else {
@@ -533,8 +531,9 @@ export default function Home() {
 
   const stats = useMemo(() => {
     const rows = art ? art.split("\n").length : 0
-    const cols = art ? Math.max(...art.split("\n").map((l) => l.length)) : 0
-    const chars = art ? [...art].filter((c) => c !== " " && c !== "\n" && c !== "\u3000").length : 0
+    const cols = art ? Math.max(...art.split("\n").map((l) => [...l].length)) : 0
+    // 统计非填充字符（排除空白单元的空格和全角空格，但保留素材中的空格难以区分，这里统计总字符数）
+    const chars = art ? [...art].filter((c) => c !== "\n" && c !== "\u3000").length - (art.match(/ /g) || []).length : 0
     return { rows, cols, chars }
   }, [art])
 
@@ -858,29 +857,28 @@ export default function Home() {
               </div>
             </div>
 
-            {/* Row 2b: Sliders — 密度 | 小字字号 | 目标字号 */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4">
-              {/* Density */}
-              <div className="space-y-1.5">
-                <div className="flex items-center justify-between">
-                  <label className="text-xs text-slate-500 font-medium flex items-center gap-1.5">
-                    <Grid3x3 className="w-3.5 h-3.5 text-indigo-500" />
-                    密度
-                  </label>
-                  <span className="stat-chip">{density}</span>
-                </div>
-                <input
-                  type="range"
-                  min={40}
-                  max={240}
-                  step={2}
-                  value={density}
-                  onChange={(e) => setDensity(Number(e.target.value))}
-                  className="tool-slider mt-2.5"
-                />
+            {/* Row 2b: 密度 (单独一行) */}
+            <div className="mt-4">
+              <div className="flex items-center justify-between">
+                <label className="text-xs text-slate-500 font-medium flex items-center gap-1.5">
+                  <Grid3x3 className="w-3.5 h-3.5 text-indigo-500" />
+                  密度
+                </label>
+                <span className="stat-chip">{density}</span>
               </div>
+              <input
+                type="range"
+                min={40}
+                max={240}
+                step={2}
+                value={density}
+                onChange={(e) => setDensity(Number(e.target.value))}
+                className="tool-slider mt-2.5"
+              />
+            </div>
 
-              {/* Source font size */}
+            {/* Row 2c: 小字字号 | 目标字号 — 始终同行 */}
+            <div className="grid grid-cols-2 gap-3 sm:gap-4 mt-4">
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between">
                   <label className="text-xs text-slate-500 font-medium flex items-center gap-1.5">
@@ -899,8 +897,6 @@ export default function Home() {
                   className="tool-slider mt-2.5"
                 />
               </div>
-
-              {/* Target font size */}
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between">
                   <label className="text-xs text-slate-500 font-medium flex items-center gap-1.5">
@@ -924,13 +920,13 @@ export default function Home() {
             {/* Row 3: Colors + Actions */}
             <div className="flex flex-wrap items-center justify-between gap-4 mt-4 pt-4 border-t border-slate-100">
               <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
-                {/* Text color */}
-                <div className="flex items-center gap-3">
+                {/* Text color — 5 常用 + 自定义 */}
+                <div className="flex items-center gap-2">
                   <span className="text-xs text-slate-500 font-medium flex items-center gap-1.5">
                     <Palette className="w-3.5 h-3.5 text-pink-500" />
-                    文字色
+                    文字
                   </span>
-                  <div className="flex flex-wrap gap-2">
+                  <div className="flex gap-2">
                     {TEXT_COLORS.map((c) => (
                       <button
                         key={c.id}
@@ -942,29 +938,51 @@ export default function Home() {
                         {textColor === c.value && <Check className="w-3.5 h-3.5 text-slate-800" />}
                       </button>
                     ))}
+                    <label className="color-swatch cursor-pointer relative overflow-hidden" style={{ background: "conic-gradient(from 0deg, #f43f5e, #fbbf24, #34d399, #38bdf8, #a78bfa, #f43f5e)" }} aria-label="自定义文字颜色">
+                      {TEXT_COLORS.every((c) => c.value !== textColor) && (
+                        <Check className="w-3.5 h-3.5 text-white drop-shadow" style={{ filter: "drop-shadow(0 0 1px #000)" }} />
+                      )}
+                      <input
+                        type="color"
+                        value={textColor}
+                        onChange={(e) => setTextColor(e.target.value)}
+                        className="absolute inset-0 opacity-0 cursor-pointer"
+                      />
+                    </label>
                   </div>
                 </div>
 
-                {/* Background color */}
-                <div className="flex items-center gap-3">
+                {/* Background color — 5 常用 + 自定义 */}
+                <div className="flex items-center gap-2">
                   <span className="text-xs text-slate-500 font-medium flex items-center gap-1.5">
                     <Grid3x3 className="w-3.5 h-3.5 text-slate-400" />
-                    背景色
+                    背景
                   </span>
-                  <div className="flex flex-wrap gap-2">
+                  <div className="flex gap-2">
                     {BG_COLORS.map((c) => (
                       <button
                         key={c.id}
                         onClick={() => setBgColor(c.value)}
                         className={`color-swatch ${bgColor === c.value ? "color-swatch-active" : ""}`}
-                        style={{ backgroundColor: c.value, border: c.value === "#ffffff" || c.value === "#f1f5f9" ? "2px solid #e2e8f0" : undefined }}
+                        style={{ backgroundColor: c.value, border: c.value === "#ffffff" ? "2px solid #e2e8f0" : undefined }}
                         aria-label={`背景颜色 ${c.id}`}
                       >
                         {bgColor === c.value && (
-                          <Check className={`w-3.5 h-3.5 ${c.value === "#ffffff" || c.value === "#f1f5f9" ? "text-slate-800" : "text-white"}`} />
+                          <Check className={`w-3.5 h-3.5 ${c.value === "#ffffff" ? "text-slate-800" : "text-white"}`} />
                         )}
                       </button>
                     ))}
+                    <label className="color-swatch cursor-pointer relative overflow-hidden" style={{ background: "conic-gradient(from 0deg, #f43f5e, #fbbf24, #34d399, #38bdf8, #a78bfa, #f43f5e)" }} aria-label="自定义背景颜色">
+                      {BG_COLORS.every((c) => c.value !== bgColor) && (
+                        <Check className="w-3.5 h-3.5 text-white" style={{ filter: "drop-shadow(0 0 1px #000)" }} />
+                      )}
+                      <input
+                        type="color"
+                        value={bgColor}
+                        onChange={(e) => setBgColor(e.target.value)}
+                        className="absolute inset-0 opacity-0 cursor-pointer"
+                      />
+                    </label>
                   </div>
                 </div>
               </div>
@@ -1047,7 +1065,7 @@ export default function Home() {
                   {displayArt}
                 </pre>
               ) : (
-                <div className="preview-empty" style={{ color: bgColor === "#ffffff" || bgColor === "#f1f5f9" ? "#64748b" : "#475569" }}>
+                <div className="preview-empty" style={{ color: bgColor === "#ffffff" ? "#64748b" : "#475569" }}>
                   <Type className="w-12 h-12 mx-auto mb-3 opacity-40" />
                   <p>输入素材文本与目标文本，开始生成拼字效果</p>
                 </div>
