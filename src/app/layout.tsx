@@ -14,7 +14,7 @@ export default function RootLayout({
   return (
     <html lang="zh-CN">
       <head>
-        <link rel="icon" href="/python-favicon.svg" />
+        <link rel="icon" href="/bigword-favicon.svg" />
       </head>
       <body
         className="antialiased"

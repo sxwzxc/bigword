@@ -95,35 +95,77 @@ const TEXT_COLORS = [
   { id: "lime", value: "#a3e635" },
 ]
 
-const PRESETS: { source: string; target: string; label: string; font: string }[] = [
+const PRESETS: { source: string; target: string; label: string; font: string; sourceFont?: string }[] = [
   { source: "Hello World!", target: "HI", label: "HI", font: "arial" },
   { source: "EdgeOne Edge Function Python Cloud", target: "EDGE", label: "EDGE", font: "impact" },
-  { source: "用字符堆叠出大字的视觉效果拼字艺术", target: "大字", label: "大字", font: "yahei" },
+  { source: "用字符堆叠出大字的视觉效果拼字艺术", target: "大字", label: "大字", font: "yahei", sourceFont: "yahei" },
   { source: "0123456789", target: "2026", label: "2026", font: "arial" },
   { source: "代码改变世界", target: "CODE", label: "CODE", font: "courier" },
-  { source: "春风又绿江南岸", target: "春", label: "春", font: "kaiti" },
+  { source: "春风又绿江南岸明月何时照我还", target: "春", label: "春", font: "kaiti", sourceFont: "kaiti" },
 ]
 
 /* ============================================================
-   Measure real cell aspect ratio of a font
+   CJK detection — cheap character-code check, no DOM needed
    ============================================================ */
 
-function measureCharAspect(fontStack: string): number {
-  if (typeof window === "undefined") return 1.67
+function isCJKCodePoint(code: number): boolean {
+  return (
+    (code >= 0x1100 && code <= 0x115f) ||  // Hangul Jamo
+    (code >= 0x2e80 && code <= 0x303e) ||  // CJK Radicals / Kangxi
+    (code >= 0x3040 && code <= 0x33bf) ||  // Hiragana, Katakana, CJK compat
+    (code >= 0x3400 && code <= 0x4dbf) ||  // CJK Ext A
+    (code >= 0x4e00 && code <= 0xa4cf) ||  // CJK Unified + Yi
+    (code >= 0xac00 && code <= 0xd7af) ||  // Hangul Syllables
+    (code >= 0xf900 && code <= 0xfaff) ||  // CJK Compatibility Ideographs
+    (code >= 0xfe30 && code <= 0xfe4f) ||  // CJK Compatibility Forms
+    (code >= 0xff00 && code <= 0xffef)     // Fullwidth / Halfwidth
+  )
+}
+
+function containsCJK(text: string): boolean {
+  for (const ch of text) {
+    const code = ch.codePointAt(0)
+    if (code !== undefined && isCJKCodePoint(code)) return true
+  }
+  return false
+}
+
+/* ============================================================
+   Cell metrics — measure actual character width of the chosen
+   source font. If source contains CJK, measure a CJK glyph
+   (which is full-width / square) and use ideographic space
+   (U+3000) for empty cells so every cell has identical width.
+   ============================================================ */
+
+interface CellMetrics {
+  charAspect: number  // cellH / cellW
+  emptyChar: string   // " " for ASCII, "\u3000" for CJK
+}
+
+function measureCellMetrics(fontStack: string, hasCJK: boolean): CellMetrics {
+  const fallback: CellMetrics = { charAspect: 1.67, emptyChar: " " }
+  if (typeof window === "undefined") return fallback
   try {
     const probe = document.createElement("span")
     probe.style.cssText =
       `font-family:${fontStack};font-size:100px;font-weight:700;` +
       `position:absolute;visibility:hidden;white-space:pre;` +
       `letter-spacing:0;line-height:1;`
-    probe.textContent = "M"
     document.body.appendChild(probe)
-    const w = probe.getBoundingClientRect().width
+
+    // Use a representative character: CJK glyph for CJK content, 'M' for ASCII
+    probe.textContent = hasCJK ? "\u5b57" : "M"
+    const charW = probe.getBoundingClientRect().width
+
     document.body.removeChild(probe)
-    if (!w || !isFinite(w)) return 1.67
-    return 100 / w
+    if (!charW || !isFinite(charW)) return fallback
+
+    return {
+      charAspect: 100 / charW,
+      emptyChar: hasCJK ? "\u3000" : " ",
+    }
   } catch {
-    return 1.67
+    return fallback
   }
 }
 
@@ -136,7 +178,7 @@ function generateBigWord(
   target: string,
   density: number,
   targetFontStack: string,
-  charAspect: number,
+  metrics: CellMetrics,
 ): string {
   const src = [...source.replace(/\s+/g, "")]
   const tgt = target
@@ -170,7 +212,7 @@ function generateBigWord(
   const img = ctx.getImageData(0, 0, canvas.width, canvas.height).data
   const cols = Math.max(8, Math.round(density))
   const cellW = canvas.width / cols
-  const cellH = cellW * charAspect
+  const cellH = cellW * metrics.charAspect
   const rows = Math.ceil(canvas.height / cellH)
 
   const out: string[] = []
@@ -189,10 +231,11 @@ function generateBigWord(
         rowChars.push(src[idx % src.length])
         idx++
       } else {
-        rowChars.push(" ")
+        rowChars.push(metrics.emptyChar)
       }
     }
-    out.push(rowChars.join("").replace(/\s+$/, ""))
+    // Trim trailing whitespace (handles both regular space and ideographic space U+3000)
+    out.push(rowChars.join("").replace(/[\s\u3000]+$/, ""))
   }
   return out.join("\n")
 }
@@ -212,7 +255,7 @@ interface EdgeResult {
 }
 
 /* ============================================================
-   Font Picker — searchable popover with tabs + system scan
+   Font Picker — portal-based popover
    ============================================================ */
 
 interface FontPickerProps {
@@ -224,7 +267,6 @@ interface FontPickerProps {
   onScan: () => void
   scanning: boolean
   scanError: string | null
-  monoOnly?: boolean
 }
 
 function FontPicker({
@@ -236,7 +278,6 @@ function FontPicker({
   onScan,
   scanning,
   scanError,
-  monoOnly,
 }: FontPickerProps) {
   const [open, setOpen] = useState(false)
   const [tab, setTab] = useState<"中文" | "西文" | "等宽" | "系统">("中文")
@@ -247,36 +288,30 @@ function FontPicker({
 
   const selected = fonts.find((f) => f.id === selectedId) ?? systemFonts.find((f) => f.id === selectedId)
 
-  const tabs: ("中文" | "西文" | "等宽" | "系统")[] = monoOnly
-    ? ["等宽", "系统"]
-    : ["中文", "西文", "等宽", "系统"]
+  const tabs: ("中文" | "西文" | "等宽" | "系统")[] = ["中文", "西文", "等宽", "系统"]
 
   useEffect(() => {
     if (!tabs.includes(tab)) setTab(tabs[0])
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [monoOnly])
+  }, [])
 
-  // Compute position from trigger rect whenever popover opens.
   useLayoutEffect(() => {
     if (!open || !triggerRef.current) return
     const rect = triggerRef.current.getBoundingClientRect()
-    const POP_MAX_H = 360 // search(44) + tabs(40) + list(280) approx
+    const POP_MAX_H = 360
     const GAP = 6
     let top = rect.bottom + GAP
-    // If not enough space below, open above
     if (top + POP_MAX_H > window.innerHeight) {
       top = Math.max(8, rect.top - POP_MAX_H - GAP)
     }
     let left = rect.left
     const width = Math.max(rect.width, 340)
-    // Keep within viewport
     if (left + width > window.innerWidth - 8) {
       left = Math.max(8, window.innerWidth - width - 8)
     }
     setCoords({ top, left, width })
   }, [open])
 
-  // Close on outside click (trigger + popover excluded) & on scroll/resize.
   useEffect(() => {
     if (!open) return
     const handler = (e: MouseEvent) => {
@@ -296,7 +331,6 @@ function FontPicker({
     }
   }, [open])
 
-  // ESC to close
   useEffect(() => {
     if (!open) return
     const onKey = (e: KeyboardEvent) => {
@@ -322,21 +356,12 @@ function FontPicker({
     open && coords ? (
       createPortal(
         <>
-          <div
-            className="font-picker-overlay"
-            onClick={() => setOpen(false)}
-          />
+          <div className="font-picker-overlay" onClick={() => setOpen(false)} />
           <div
             ref={popoverRef}
             className="font-picker"
-            style={{
-              position: "fixed",
-              top: coords.top,
-              left: coords.left,
-              width: coords.width,
-            }}
+            style={{ position: "fixed", top: coords.top, left: coords.left, width: coords.width }}
           >
-            {/* Search */}
             <div className="relative">
               <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
               <input
@@ -355,8 +380,6 @@ function FontPicker({
                 </button>
               )}
             </div>
-
-            {/* Tabs */}
             <div className="font-picker-tabs">
               {tabs.map((t) => (
                 <button
@@ -371,8 +394,6 @@ function FontPicker({
                 </button>
               ))}
             </div>
-
-            {/* List */}
             <div className="font-picker-list">
               {tab === "系统" && systemFonts.length === 0 && (
                 <div className="font-picker-empty">
@@ -399,8 +420,6 @@ function FontPicker({
                 <div className="font-picker-empty">无匹配字体</div>
               )}
             </div>
-
-            {/* Scan button */}
             {tab === "系统" && (
               <div className="font-picker-scan">
                 <button
@@ -464,7 +483,6 @@ export default function Home() {
   const [edgeLoading, setEdgeLoading] = useState(false)
   const [copied, setCopied] = useState(false)
 
-  // System fonts
   const [systemFonts, setSystemFonts] = useState<FontDef[]>([])
   const [scanning, setScanning] = useState(false)
   const [scanError, setScanError] = useState<string | null>(null)
@@ -473,18 +491,23 @@ export default function Home() {
 
   const allFonts = useMemo(() => [...BUILTIN_FONTS, ...systemFonts], [systemFonts])
   const targetFont = allFonts.find((f) => f.id === targetFontId) ?? BUILTIN_FONTS[0]
-  const sourceFont =
-    allFonts.find((f) => f.id === sourceFontId) ??
-    BUILTIN_FONTS.find((f) => f.mono)!
+  const sourceFont = allFonts.find((f) => f.id === sourceFontId) ?? BUILTIN_FONTS[0]
 
-  const charAspect = useMemo(() => measureCharAspect(sourceFont.stack), [sourceFont.stack])
+  // Cheap CJK check on source text (no DOM, just code-point ranges)
+  const hasCJK = useMemo(() => containsCJK(source), [source])
+
+  // Measure cell metrics only when font or CJK status changes (not on every keystroke)
+  const cellMetrics = useMemo(
+    () => measureCellMetrics(sourceFont.stack, hasCJK),
+    [sourceFont.stack, hasCJK],
+  )
 
   const recompute = useCallback(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current)
     debounceRef.current = setTimeout(() => {
-      setArt(generateBigWord(source, target, density, targetFont.stack, charAspect))
+      setArt(generateBigWord(source, target, density, targetFont.stack, cellMetrics))
     }, 110)
-  }, [source, target, density, targetFont.stack, charAspect])
+  }, [source, target, density, targetFont.stack, cellMetrics])
 
   useEffect(() => {
     recompute()
@@ -496,7 +519,7 @@ export default function Home() {
   const stats = useMemo(() => {
     const rows = art ? art.split("\n").length : 0
     const cols = art ? Math.max(...art.split("\n").map((l) => l.length)) : 0
-    const chars = art ? [...art].filter((c) => c !== " " && c !== "\n").length : 0
+    const chars = art ? [...art].filter((c) => c !== " " && c !== "\n" && c !== "\u3000").length : 0
     return { rows, cols, chars }
   }, [art])
 
@@ -518,13 +541,7 @@ export default function Home() {
         const fam = f.family
         if (!fam || seen.has(fam)) continue
         seen.add(fam)
-        defs.push({
-          id: `sys:${fam}`,
-          label: fam,
-          group: "系统",
-          stack: `"${fam}", monospace`,
-          mono: false,
-        })
+        defs.push({ id: `sys:${fam}`, label: fam, group: "系统", stack: `"${fam}", monospace` })
       }
       defs.sort((a, b) => a.label.localeCompare(b.label))
       setSystemFonts(defs)
@@ -557,11 +574,7 @@ export default function Home() {
     } catch {
       setEdgeResult({
         art: "// 边缘函数调用失败，请通过 edgeone pages dev 启动本地环境后重试。",
-        rows: 0,
-        cols: 0,
-        chars: 0,
-        generatedAt: Date.now(),
-        runtime: "error",
+        rows: 0, cols: 0, chars: 0, generatedAt: Date.now(), runtime: "error",
       })
     } finally {
       setEdgeLoading(false)
@@ -575,9 +588,7 @@ export default function Home() {
       await navigator.clipboard.writeText(text)
       setCopied(true)
       setTimeout(() => setCopied(false), 1500)
-    } catch {
-      /* ignore */
-    }
+    } catch { /* ignore */ }
   }
 
   const handleDownload = () => {
@@ -594,11 +605,7 @@ export default function Home() {
 
   const handleShuffle = () => {
     setSource((s) =>
-      [...s]
-        .map((c) => ({ c, k: Math.random() }))
-        .sort((a, b) => a.k - b.k)
-        .map((x) => x.c)
-        .join(""),
+      [...s].map((c) => ({ c, k: Math.random() })).sort((a, b) => a.k - b.k).map((x) => x.c).join(""),
     )
   }
 
@@ -612,10 +619,11 @@ export default function Home() {
     setTextColor("#818cf8")
   }
 
-  const applyPreset = (p: { source: string; target: string; font: string }) => {
+  const applyPreset = (p: { source: string; target: string; font: string; sourceFont?: string }) => {
     setSource(p.source)
     setTarget(p.target)
     setTargetFontId(p.font)
+    if (p.sourceFont) setSourceFontId(p.sourceFont)
   }
 
   const displayArt = tab === "edge" ? edgeResult?.art ?? "" : art
@@ -626,7 +634,7 @@ export default function Home() {
 
   return (
     <div className="min-h-screen bg-slate-100 text-slate-900 relative">
-      {/* Decorative gradient blobs — flat, bright */}
+      {/* Decorative gradient blobs */}
       <div className="fixed inset-0 overflow-hidden pointer-events-none -z-10">
         <div className="absolute -top-32 -left-32 w-96 h-96 rounded-full bg-indigo-300/30 blur-3xl" />
         <div className="absolute top-1/3 -right-24 w-80 h-80 rounded-full bg-pink-300/25 blur-3xl" />
@@ -653,19 +661,15 @@ export default function Home() {
             aria-label="GitHub"
           >
             <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-              <path
-                fillRule="evenodd"
-                d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"
-                clipRule="evenodd"
-              />
+              <path fillRule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z" clipRule="evenodd" />
             </svg>
           </a>
         </div>
       </header>
 
-      <main className="max-w-7xl mx-auto px-6 py-10 md:py-14">
+      <main className="max-w-7xl mx-auto px-6 py-8 md:py-12">
         {/* Hero */}
-        <div className="text-center mb-10 animate-fade-in-up">
+        <div className="text-center mb-6 animate-fade-in-up">
           <h1 className="text-4xl md:text-6xl font-black leading-tight mb-3">
             <span className="bg-clip-text text-transparent bg-gradient-to-r from-indigo-500 via-pink-500 to-amber-500">
               用字符，拼出大字
@@ -679,7 +683,7 @@ export default function Home() {
         </div>
 
         {/* Presets */}
-        <div className="flex flex-wrap gap-2 justify-center mb-8 animate-fade-in-up animation-delay-100">
+        <div className="flex flex-wrap gap-2 justify-center mb-6 animate-fade-in-up animation-delay-100">
           {PRESETS.map((p) => (
             <button
               key={p.label}
@@ -691,299 +695,276 @@ export default function Home() {
           ))}
         </div>
 
-        {/* Workspace */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
-          {/* Left — controls */}
-          <div className="lg:col-span-5 space-y-5 lg:sticky lg:top-20">
-            {/* Inputs */}
-            <Card className="flat-card border-0 animate-fade-in-up animation-delay-100 shadow-sm">
-              <CardContent className="p-5 space-y-4">
-                {/* Source */}
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span className="label-pill" style={{ color: "#ec4899" }}>
-                      <Sparkles className="w-3.5 h-3.5" />
-                      素材文本
-                    </span>
-                    <div className="flex items-center gap-2">
-                      <span className="stat-chip">
-                        <Hash className="w-3 h-3" />
-                        {[...source.replace(/\s+/g, "")].length}
-                      </span>
-                      <button
-                        onClick={handleShuffle}
-                        className="text-slate-400 hover:text-amber-500 transition-colors p-1.5 rounded-lg hover:bg-amber-50 cursor-pointer"
-                        title="打乱素材顺序"
-                        aria-label="打乱素材顺序"
-                      >
-                        <Shuffle className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  </div>
-                  <textarea
-                    className="tool-textarea"
-                    rows={3}
-                    value={source}
-                    onChange={(e) => setSource(e.target.value)}
-                    placeholder="作为字符来源的文本，例如：Hello EdgeOne!"
-                  />
-                </div>
-
-                {/* Target */}
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span className="label-pill" style={{ color: "#6366f1" }}>
-                      <Type className="w-3.5 h-3.5" />
-                      目标文本
-                    </span>
+        {/* Controls — full width, horizontal layout */}
+        <Card className="flat-card border-0 shadow-sm mb-5 animate-fade-in-up animation-delay-100">
+          <CardContent className="p-5">
+            {/* Row 1: Source | Target */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+              {/* Source */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="label-pill" style={{ color: "#ec4899" }}>
+                    <Sparkles className="w-3.5 h-3.5" />
+                    素材文本
+                  </span>
+                  <div className="flex items-center gap-2">
                     <span className="stat-chip">
-                      <Type className="w-3 h-3" />
-                      {target.length}
+                      <Hash className="w-3 h-3" />
+                      {[...source.replace(/\s+/g, "")].length}
                     </span>
-                  </div>
-                  <textarea
-                    className="tool-textarea"
-                    rows={2}
-                    value={target}
-                    onChange={(e) => setTarget(e.target.value)}
-                    placeholder="最终要呈现的内容，例如：HI"
-                  />
-                </div>
-
-                <button
-                  onClick={handleReset}
-                  className="ml-auto flex items-center gap-1 text-xs text-slate-400 hover:text-indigo-600 transition-colors cursor-pointer"
-                >
-                  <RotateCcw className="w-3 h-3" />
-                  重置全部
-                </button>
-              </CardContent>
-            </Card>
-
-            {/* Typography */}
-            <Card className="flat-card border-0 animate-fade-in-up animation-delay-200 shadow-sm">
-              <CardContent className="p-5 space-y-4">
-                <div className="flex items-center gap-2 text-xs font-bold tracking-wider uppercase text-slate-400">
-                  <Palette className="w-3.5 h-3.5" />
-                  排版设置
-                </div>
-
-                {/* Target font picker */}
-                <div className="space-y-1.5">
-                  <label className="text-xs text-slate-500 font-medium">
-                    目标字体 <span className="text-slate-400">· 决定大字形态</span>
-                  </label>
-                  <FontPicker
-                    accent="#6366f1"
-                    fonts={allFonts}
-                    selectedId={targetFontId}
-                    onSelect={setTargetFontId}
-                    systemFonts={systemFonts}
-                    onScan={scanSystemFonts}
-                    scanning={scanning}
-                    scanError={scanError}
-                  />
-                </div>
-
-                {/* Source font picker */}
-                <div className="space-y-1.5">
-                  <label className="text-xs text-slate-500 font-medium">
-                    素材字体 <span className="text-slate-400">· 等宽，决定小字观感</span>
-                  </label>
-                  <FontPicker
-                    accent="#10b981"
-                    fonts={allFonts}
-                    selectedId={sourceFontId}
-                    onSelect={setSourceFontId}
-                    systemFonts={systemFonts}
-                    onScan={scanSystemFonts}
-                    scanning={scanning}
-                    scanError={scanError}
-                    monoOnly
-                  />
-                </div>
-
-                {/* Sliders */}
-                <div className="grid grid-cols-2 gap-4 pt-1">
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between">
-                      <label className="text-xs text-slate-500 font-medium flex items-center gap-1.5">
-                        <Grid3x3 className="w-3.5 h-3.5 text-indigo-500" />
-                        密度
-                      </label>
-                      <span className="stat-chip">{density}</span>
-                    </div>
-                    <input
-                      type="range"
-                      min={40}
-                      max={240}
-                      step={2}
-                      value={density}
-                      onChange={(e) => setDensity(Number(e.target.value))}
-                      className="tool-slider"
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between">
-                      <label className="text-xs text-slate-500 font-medium flex items-center gap-1.5">
-                        <Type className="w-3.5 h-3.5 text-amber-500" />
-                        字号
-                      </label>
-                      <span className="stat-chip">{fontSize}px</span>
-                    </div>
-                    <input
-                      type="range"
-                      min={4}
-                      max={24}
-                      step={1}
-                      value={fontSize}
-                      onChange={(e) => setFontSize(Number(e.target.value))}
-                      className="tool-slider"
-                    />
-                  </div>
-                </div>
-
-                {/* Colors */}
-                <div className="space-y-2 pt-1">
-                  <label className="text-xs text-slate-500 font-medium">文字颜色</label>
-                  <div className="flex flex-wrap gap-2">
-                    {TEXT_COLORS.map((c) => (
-                      <button
-                        key={c.id}
-                        onClick={() => setTextColor(c.value)}
-                        className={`color-swatch ${textColor === c.value ? "color-swatch-active" : ""}`}
-                        style={{ backgroundColor: c.value }}
-                        aria-label={`颜色 ${c.id}`}
-                      >
-                        {textColor === c.value && <Check className="w-3.5 h-3.5 text-slate-800" />}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-          </div>
-
-          {/* Right — preview */}
-          <div className="lg:col-span-7 animate-fade-in-up animation-delay-200">
-            <Card className="flat-card border-0 shadow-sm">
-              <CardContent className="p-5">
-                {/* Toolbar */}
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
-                  <div className="flex items-center gap-1.5">
-                    <button
-                      className={`tab-btn ${tab === "live" ? "active" : ""}`}
-                      onClick={() => setTab("live")}
-                    >
-                      <Zap className="w-3.5 h-3.5 inline mr-1" />
-                      实时预览
-                    </button>
-                    <button
-                      className={`tab-btn ${tab === "edge" ? "active" : ""}`}
-                      onClick={() => edgeResult && setTab("edge")}
-                      style={!edgeResult ? { opacity: 0.5 } : undefined}
-                    >
-                      <Cloud className="w-3.5 h-3.5 inline mr-1" />
-                      边缘渲染
-                    </button>
-                  </div>
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="stat-chip">行 {displayStats.rows}</span>
-                    <span className="stat-chip">列 {displayStats.cols}</span>
-                    <span className="stat-chip">字符 {displayStats.chars}</span>
-                    <div className="w-px h-4 bg-slate-200 mx-0.5 hidden sm:block" />
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={handleCopy}
-                      disabled={!displayArt}
-                      className="text-slate-500 hover:text-indigo-600 cursor-pointer h-8"
-                    >
-                      {copied ? (
-                        <Check className="w-3.5 h-3.5 mr-1 text-emerald-500" />
-                      ) : (
-                        <Copy className="w-3.5 h-3.5 mr-1" />
-                      )}
-                      {copied ? "已复制" : "复制"}
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={handleDownload}
-                      disabled={!displayArt}
-                      className="text-slate-500 hover:text-indigo-600 cursor-pointer h-8"
-                    >
-                      <Download className="w-3.5 h-3.5 mr-1" />
-                      下载
-                    </Button>
-                  </div>
-                </div>
-
-                {/* Edge banner */}
-                {tab === "edge" && edgeResult && (
-                  <div className="edge-banner mb-3 flex flex-wrap items-center gap-x-4 gap-y-1">
-                    <span className="text-amber-600 font-bold">⚡ {edgeResult.runtime}</span>
-                    <span>生成于 {new Date(edgeResult.generatedAt).toLocaleTimeString("zh-CN")}</span>
-                    {edgeResult.region && <span>节点 {edgeResult.region}</span>}
-                    <span className="text-slate-400">— 纯 Python 点阵字库，零依赖，边缘节点运行</span>
-                  </div>
-                )}
-
-                {/* Preview */}
-                <div className="preview-wrap" style={{ maxHeight: "64vh" }}>
-                  {displayArt ? (
-                    <pre
-                      className="preview-canvas"
-                      style={{
-                        fontSize: `${fontSize}px`,
-                        fontFamily: sourceFont.stack,
-                        color: textColor,
-                      }}
-                    >
-                      {displayArt}
-                    </pre>
-                  ) : (
-                    <div className="preview-empty">
-                      <Type className="w-12 h-12 mx-auto mb-3 text-slate-700" />
-                      <p>输入素材文本与目标文本，开始生成拼字效果</p>
-                    </div>
-                  )}
-                </div>
-
-                {/* Footer */}
-                <div className="mt-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-                  <p className="text-xs text-slate-400 leading-relaxed">
-                    实时预览基于浏览器 Canvas 像素采样（高保真，支持中英文）；
-                    边缘渲染通过 EdgeOne 边缘函数生成（纯 Python，可作 API 调用）。
-                  </p>
-                  <Button
-                    onClick={callEdge}
-                    disabled={edgeLoading}
-                    className="btn-primary rounded-lg cursor-pointer shrink-0"
-                    size="sm"
-                  >
-                    {edgeLoading ? (
-                      <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin mr-2" />
-                    ) : (
-                      <Cloud className="w-4 h-4 mr-2" />
+                    {hasCJK && (
+                      <span className="stat-chip" style={{ background: "#fef3c7", border: "#fde68a", color: "#92400e" }}>
+                        CJK
+                      </span>
                     )}
-                    调用边缘函数
-                  </Button>
+                    <button
+                      onClick={handleShuffle}
+                      className="text-slate-400 hover:text-amber-500 transition-colors p-1.5 rounded-lg hover:bg-amber-50 cursor-pointer"
+                      title="打乱素材顺序"
+                      aria-label="打乱素材顺序"
+                    >
+                      <Shuffle className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
                 </div>
-              </CardContent>
-            </Card>
-          </div>
-        </div>
+                <textarea
+                  className="tool-textarea"
+                  rows={3}
+                  value={source}
+                  onChange={(e) => setSource(e.target.value)}
+                  placeholder="作为字符来源的文本，例如：Hello EdgeOne!"
+                />
+              </div>
+
+              {/* Target */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="label-pill" style={{ color: "#6366f1" }}>
+                    <Type className="w-3.5 h-3.5" />
+                    目标文本
+                  </span>
+                  <span className="stat-chip">
+                    <Type className="w-3 h-3" />
+                    {target.length}
+                  </span>
+                </div>
+                <textarea
+                  className="tool-textarea"
+                  rows={3}
+                  value={target}
+                  onChange={(e) => setTarget(e.target.value)}
+                  placeholder="最终要呈现的内容，例如：HI"
+                />
+              </div>
+            </div>
+
+            {/* Row 2: Font pickers + Sliders */}
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+              {/* Target font */}
+              <div className="space-y-1.5">
+                <label className="text-xs text-slate-500 font-medium">
+                  目标字体 <span className="text-slate-400">· 大字形态</span>
+                </label>
+                <FontPicker
+                  accent="#6366f1"
+                  fonts={allFonts}
+                  selectedId={targetFontId}
+                  onSelect={setTargetFontId}
+                  systemFonts={systemFonts}
+                  onScan={scanSystemFonts}
+                  scanning={scanning}
+                  scanError={scanError}
+                />
+              </div>
+
+              {/* Source font */}
+              <div className="space-y-1.5">
+                <label className="text-xs text-slate-500 font-medium">
+                  素材字体 <span className="text-slate-400">· 小字观感</span>
+                </label>
+                <FontPicker
+                  accent="#10b981"
+                  fonts={allFonts}
+                  selectedId={sourceFontId}
+                  onSelect={setSourceFontId}
+                  systemFonts={systemFonts}
+                  onScan={scanSystemFonts}
+                  scanning={scanning}
+                  scanError={scanError}
+                />
+              </div>
+
+              {/* Density */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs text-slate-500 font-medium flex items-center gap-1.5">
+                    <Grid3x3 className="w-3.5 h-3.5 text-indigo-500" />
+                    密度
+                  </label>
+                  <span className="stat-chip">{density}</span>
+                </div>
+                <input
+                  type="range"
+                  min={40}
+                  max={240}
+                  step={2}
+                  value={density}
+                  onChange={(e) => setDensity(Number(e.target.value))}
+                  className="tool-slider mt-2.5"
+                />
+              </div>
+
+              {/* Font size */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs text-slate-500 font-medium flex items-center gap-1.5">
+                    <Type className="w-3.5 h-3.5 text-amber-500" />
+                    字号
+                  </label>
+                  <span className="stat-chip">{fontSize}px</span>
+                </div>
+                <input
+                  type="range"
+                  min={4}
+                  max={24}
+                  step={1}
+                  value={fontSize}
+                  onChange={(e) => setFontSize(Number(e.target.value))}
+                  className="tool-slider mt-2.5"
+                />
+              </div>
+            </div>
+
+            {/* Row 3: Colors + Actions */}
+            <div className="flex flex-wrap items-center justify-between gap-4 mt-4 pt-4 border-t border-slate-100">
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-slate-500 font-medium flex items-center gap-1.5">
+                  <Palette className="w-3.5 h-3.5 text-pink-500" />
+                  颜色
+                </span>
+                <div className="flex flex-wrap gap-2">
+                  {TEXT_COLORS.map((c) => (
+                    <button
+                      key={c.id}
+                      onClick={() => setTextColor(c.value)}
+                      className={`color-swatch ${textColor === c.value ? "color-swatch-active" : ""}`}
+                      style={{ backgroundColor: c.value }}
+                      aria-label={`颜色 ${c.id}`}
+                    >
+                      {textColor === c.value && <Check className="w-3.5 h-3.5 text-slate-800" />}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <button
+                onClick={handleReset}
+                className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-indigo-600 transition-colors cursor-pointer px-3 py-1.5 rounded-lg hover:bg-indigo-50"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                重置全部
+              </button>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Preview — full width, taller */}
+        <Card className="flat-card border-0 shadow-sm mb-10 animate-fade-in-up animation-delay-200">
+          <CardContent className="p-5">
+            {/* Toolbar */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
+              <div className="flex items-center gap-1.5">
+                <button className={`tab-btn ${tab === "live" ? "active" : ""}`} onClick={() => setTab("live")}>
+                  <Zap className="w-3.5 h-3.5 inline mr-1" />
+                  实时预览
+                </button>
+                <button
+                  className={`tab-btn ${tab === "edge" ? "active" : ""}`}
+                  onClick={() => edgeResult && setTab("edge")}
+                  style={!edgeResult ? { opacity: 0.5 } : undefined}
+                >
+                  <Cloud className="w-3.5 h-3.5 inline mr-1" />
+                  边缘渲染
+                </button>
+              </div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="stat-chip">行 {displayStats.rows}</span>
+                <span className="stat-chip">列 {displayStats.cols}</span>
+                <span className="stat-chip">字符 {displayStats.chars}</span>
+                <div className="w-px h-4 bg-slate-200 mx-0.5 hidden sm:block" />
+                <Button
+                  size="sm" variant="ghost" onClick={handleCopy} disabled={!displayArt}
+                  className="text-slate-500 hover:text-indigo-600 cursor-pointer h-8"
+                >
+                  {copied ? <Check className="w-3.5 h-3.5 mr-1 text-emerald-500" /> : <Copy className="w-3.5 h-3.5 mr-1" />}
+                  {copied ? "已复制" : "复制"}
+                </Button>
+                <Button
+                  size="sm" variant="ghost" onClick={handleDownload} disabled={!displayArt}
+                  className="text-slate-500 hover:text-indigo-600 cursor-pointer h-8"
+                >
+                  <Download className="w-3.5 h-3.5 mr-1" />
+                  下载
+                </Button>
+              </div>
+            </div>
+
+            {/* Edge banner */}
+            {tab === "edge" && edgeResult && (
+              <div className="edge-banner mb-3 flex flex-wrap items-center gap-x-4 gap-y-1">
+                <span className="text-amber-600 font-bold">⚡ {edgeResult.runtime}</span>
+                <span>生成于 {new Date(edgeResult.generatedAt).toLocaleTimeString("zh-CN")}</span>
+                {edgeResult.region && <span>节点 {edgeResult.region}</span>}
+                <span className="text-slate-400">— 纯 Python 点阵字库，零依赖，边缘节点运行</span>
+              </div>
+            )}
+
+            {/* Preview area — taller for wider layout */}
+            <div className="preview-wrap" style={{ maxHeight: "70vh" }}>
+              {displayArt ? (
+                <pre
+                  className="preview-canvas"
+                  style={{ fontSize: `${fontSize}px`, fontFamily: sourceFont.stack, color: textColor }}
+                >
+                  {displayArt}
+                </pre>
+              ) : (
+                <div className="preview-empty">
+                  <Type className="w-12 h-12 mx-auto mb-3 text-slate-700" />
+                  <p>输入素材文本与目标文本，开始生成拼字效果</p>
+                </div>
+              )}
+            </div>
+
+            {/* Footer */}
+            <div className="mt-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+              <p className="text-xs text-slate-400 leading-relaxed">
+                实时预览基于浏览器 Canvas 像素采样（高保真，支持中英文，自动适配全角/半角字符宽度）；
+                边缘渲染通过 EdgeOne 边缘函数生成（纯 Python，可作 API 调用）。
+              </p>
+              <Button
+                onClick={callEdge} disabled={edgeLoading}
+                className="btn-primary rounded-lg cursor-pointer shrink-0" size="sm"
+              >
+                {edgeLoading ? (
+                  <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin mr-2" />
+                ) : (
+                  <Cloud className="w-4 h-4 mr-2" />
+                )}
+                调用边缘函数
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
 
         {/* Features */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-5 mt-10">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
           <div className="feature-card p-5 animate-fade-in-up animation-delay-100">
             <div className="w-11 h-11 mb-4 rounded-xl bg-indigo-100 flex items-center justify-center">
               <Zap className="w-5 h-5 text-indigo-600" />
             </div>
-            <h3 className="font-bold mb-2 text-slate-800">像素级对齐</h3>
+            <h3 className="font-bold mb-2 text-slate-800">全角半角自适应</h3>
             <p className="text-slate-500 text-sm leading-relaxed">
-              动态测量素材字体真实字符宽高比，采样网格与显示网格严格一致，拼字无错位
+              自动检测素材中的中文字符，测量全角字符宽度并使用全角空格对齐，中英文拼字均无错位
             </p>
           </div>
           <div className="feature-card p-5 animate-fade-in-up animation-delay-200">
@@ -992,7 +973,7 @@ export default function Home() {
             </div>
             <h3 className="font-bold mb-2 text-slate-800">全字体可选</h3>
             <p className="text-slate-500 text-sm leading-relaxed">
-              内置 30+ 中西文字体与等宽字体，支持扫描系统全部已安装字体，目标与素材双字体独立控制
+              内置 30+ 中西文与等宽字体，支持扫描系统全部已安装字体，目标与素材双字体独立控制
             </p>
           </div>
           <div className="feature-card p-5 animate-fade-in-up animation-delay-300">
@@ -1011,9 +992,7 @@ export default function Home() {
         <div className="max-w-7xl mx-auto px-6 py-8 flex items-center justify-center gap-2 text-slate-400 text-sm">
           <span>Powered by</span>
           <a
-            href="https://pages.edgeone.ai"
-            target="_blank"
-            rel="noopener noreferrer"
+            href="https://pages.edgeone.ai" target="_blank" rel="noopener noreferrer"
             className="text-slate-500 hover:text-indigo-600 transition-colors flex items-center gap-1 font-medium"
           >
             <Cloud className="w-4 h-4" />
