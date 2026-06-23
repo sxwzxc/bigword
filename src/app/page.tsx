@@ -266,71 +266,84 @@ function generateBigWord(
 
   if (preventTruncation) {
     // 防截断模式：以空格分割素材为"词"
-    // 规则：
-    //   1. 每个词必须完整输出，不可截断
-    //   2. 词与词之间至少 1 个空格（循环边界也补充空格）
-    //   3. 空格个数可根据渲染需要调整（行尾填空格对齐）
+    // 核心规则：每个词必须完整放入一个连续暗像素段（不跨间隙）
+    // 同一大字内部的笔画间隙也算截断，因此词不可跨越间隙
     const words = source.split(/\s+/).filter((w) => w.length > 0)
     if (words.length === 0) return ""
 
-    // 将每个词转为字符数组（CJK 模式下转全角）
     const wordChars: string[][] = words.map((w) => [...w].map(convertChar))
-    const spaceToken = spaceChar // 词间分隔符（1 个空格单元）
 
-    // 令牌流：word1, space, word2, space, ..., wordN, space, word1, space, ...
-    // 注意：最后一个词后面也有 space，保证循环边界有空格分隔
+    // 令牌流：word1, space, word2, space, ..., wordN, space（循环时 boundary 也有 space）
     interface Token { chars: string[]; isSpace: boolean }
-    const buildTokens = (): Token[] => {
-      const ts: Token[] = []
-      for (let i = 0; i < wordChars.length; i++) {
-        ts.push({ chars: wordChars[i], isSpace: false })
-        ts.push({ chars: [spaceToken], isSpace: true })
-      }
-      return ts
+    const tokens: Token[] = []
+    for (let i = 0; i < wordChars.length; i++) {
+      tokens.push({ chars: wordChars[i], isSpace: false })
+      tokens.push({ chars: [spaceChar], isSpace: true })
     }
-    const tokens = buildTokens()
+
+    // 找出一行中的连续暗像素段
+    const findSegments = (row: boolean[]): number[][] => {
+      const segs: number[][] = []
+      let cur: number[] = []
+      for (let c = 0; c < row.length; c++) {
+        if (row[c]) {
+          cur.push(c)
+        } else if (cur.length > 0) {
+          segs.push(cur)
+          cur = []
+        }
+      }
+      if (cur.length > 0) segs.push(cur)
+      return segs
+    }
+
+    // 预计算最大段长度，用于跳过永远放不下的 token
+    let maxSegLen = 0
+    for (let r = 0; r < rows; r++) {
+      for (const seg of findSegments(darkGrid[r])) {
+        if (seg.length > maxSegLen) maxSegLen = seg.length
+      }
+    }
+    if (maxSegLen === 0) return ""
 
     let tokenIdx = 0
-    let charInToken = 0
+
+    // 跳过比最大段还长的 token
+    const advanceToValidToken = () => {
+      let guard = 0
+      while (guard < tokens.length * 2) {
+        if (tokenIdx >= tokens.length) tokenIdx = 0
+        if (tokens[tokenIdx].chars.length <= maxSegLen) return
+        tokenIdx++
+        guard++
+      }
+    }
 
     for (let r = 0; r < rows; r++) {
-      const darkCols: number[] = []
-      for (let c = 0; c < cols; c++) {
-        if (darkGrid[r][c]) darkCols.push(c)
-      }
-
+      const segments = findSegments(darkGrid[r])
       const rowChars: string[] = new Array(cols).fill(metrics.emptyChar)
-      let darkPtr = 0
 
-      while (darkPtr < darkCols.length) {
-        if (tokenIdx >= tokens.length) {
-          tokenIdx = 0
-          charInToken = 0
-        }
+      for (const seg of segments) {
+        let segPtr = 0
+        while (segPtr < seg.length) {
+          advanceToValidToken()
+          if (tokenIdx >= tokens.length) tokenIdx = 0
 
-        const token = tokens[tokenIdx]
-        const remainingToken = token.chars.length - charInToken
-        const remainingDark = darkCols.length - darkPtr
+          const token = tokens[tokenIdx]
+          const remainingToken = token.chars.length
+          const remainingSeg = seg.length - segPtr
 
-        if (remainingToken <= remainingDark) {
-          // 令牌完整放入当前行剩余暗像素
-          for (let i = 0; i < remainingToken; i++) {
-            rowChars[darkCols[darkPtr]] = token.chars[charInToken + i]
-            darkPtr++
+          if (remainingToken <= remainingSeg) {
+            // 令牌完整放入当前段的剩余空间
+            for (let i = 0; i < remainingToken; i++) {
+              rowChars[seg[segPtr]] = token.chars[i]
+              segPtr++
+            }
+            tokenIdx++
+          } else {
+            // 令牌放不进剩余空间——段内剩余位置留空，令牌等下一段
+            break
           }
-          tokenIdx++
-          charInToken = 0
-        } else if (remainingToken > darkCols.length) {
-          // 令牌比整行暗像素还长——强制跨行续接
-          for (let i = 0; i < remainingDark; i++) {
-            rowChars[darkCols[darkPtr]] = token.chars[charInToken + i]
-            darkPtr++
-          }
-          charInToken += remainingDark
-          break
-        } else {
-          // 令牌能放入完整行但放不进剩余空间——填充空格，令牌移至下一行
-          break
         }
       }
 
@@ -595,8 +608,8 @@ function FontPicker({
 export default function Home() {
   const [source, setSource] = useState("鳖鳖")
   const [target, setTarget] = useState("赖疙宝")
-  const [fontSize, setFontSize] = useState(10)
-  const [targetFontSize, setTargetFontSize] = useState(320)
+  const [fontSize, setFontSize] = useState(7)
+  const [targetFontSize, setTargetFontSize] = useState(600)
   const [targetFontId, setTargetFontId] = useState("yahei")
   const [sourceFontId, setSourceFontId] = useState("yahei")
   const [textColor, setTextColor] = useState("#818cf8")
@@ -783,8 +796,8 @@ export default function Home() {
   const handleReset = () => {
     setSource("鳖鳖")
     setTarget("赖疙宝")
-    setFontSize(10)
-    setTargetFontSize(320)
+    setFontSize(7)
+    setTargetFontSize(600)
     setTargetFontId("yahei")
     setSourceFontId("yahei")
     setTextColor("#818cf8")
@@ -1010,7 +1023,7 @@ export default function Home() {
                 <input
                   type="range"
                   min={80}
-                  max={600}
+                  max={2000}
                   step={10}
                   value={targetFontSize}
                   onChange={(e) => setTargetFontSize(Number(e.target.value))}
