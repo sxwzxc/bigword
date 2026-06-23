@@ -154,6 +154,7 @@ function isFullwidthChar(ch: string): boolean {
 }
 
 // Returns width in half-width cells: fullwidth = 2, halfwidth = 1
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function charCellWidth(ch: string): number {
   return isFullwidthChar(ch) ? 2 : 1
 }
@@ -185,10 +186,14 @@ function toFullwidth(ch: string): string {
 interface CellMetrics {
   charAspect: number  // cellH / cellW
   emptyChar: string
+  // CJK 模式: spaceCells = 全角字符占多少个空格的渲染宽度
+  // 实测空格可能远窄于半角，需要动态测量
+  spaceCells: number  // 一个空格占多少个采样cell
+  fullCells: number   // 一个全角字符占多少个采样cell
 }
 
 function measureCellMetrics(fontStack: string, hasCJK: boolean): CellMetrics {
-  const fallback: CellMetrics = { charAspect: 1.0, emptyChar: " " }
+  const fallback: CellMetrics = { charAspect: 1.0, emptyChar: " ", spaceCells: 1, fullCells: 1 }
   if (typeof window === "undefined") return fallback
   try {
     const probe = document.createElement("span")
@@ -199,19 +204,29 @@ function measureCellMetrics(fontStack: string, hasCJK: boolean): CellMetrics {
     document.body.appendChild(probe)
 
     if (hasCJK) {
-      // CJK mode: measure fullwidth char, cell = half of that
+      // 测量全角字符（中文）和空格的实际渲染宽度
       probe.textContent = "\u5b57"
       const cjkW = probe.getBoundingClientRect().width
+      probe.textContent = " "
+      const spaceW = probe.getBoundingClientRect().width
       document.body.removeChild(probe)
-      if (!cjkW || !isFinite(cjkW)) return { charAspect: 2.0, emptyChar: " " }
-      // cellW = cjkW / 2, cellH = cjkW → charAspect = cjkW / (cjkW/2) = 2.0
-      return { charAspect: 2.0, emptyChar: " " }
+      if (!cjkW || !isFinite(cjkW)) {
+        return { charAspect: 2.0, emptyChar: " ", spaceCells: 1, fullCells: 2 }
+      }
+
+      // 以空格宽度为 1 个 cell（最小单位）
+      // 全角字符占 round(cjkW / spaceW) 个 cell
+      const sCells = 1
+      const fCells = Math.max(1, Math.round(cjkW / (spaceW || cjkW / 2)))
+      // charAspect: cellH / cellW. cellW = spaceW, cellH ≈ cjkW (CJK方形)
+      const charAspect = cjkW / (spaceW || cjkW / 2)
+      return { charAspect, emptyChar: " ", spaceCells: sCells, fullCells: fCells }
     } else {
       probe.textContent = "M"
       const asciiW = probe.getBoundingClientRect().width
       document.body.removeChild(probe)
       if (!asciiW || !isFinite(asciiW)) return fallback
-      return { charAspect: 100 / asciiW, emptyChar: " " }
+      return { charAspect: 100 / asciiW, emptyChar: " ", spaceCells: 1, fullCells: 1 }
     }
   } catch {
     return fallback
@@ -261,10 +276,11 @@ function generateBigWord(
 
   const img = ctx.getImageData(0, 0, canvas.width, canvas.height).data
 
-  // CJK 模式: cell = 半角宽, cols 翻倍, 全角字符占 2 cell, 半角(空格)占 1 cell
+  // CJK 模式: cell = 空格渲染宽, cols 按空格宽度细分
+  // 全角字符占 metrics.fullCells 个 cell, 空格占 metrics.spaceCells 个 cell
   // ASCII 模式: cell = 'M' 宽, 所有字符占 1 cell
   const baseCols = Math.max(8, Math.round(baseFont * 0.375))
-  const cols = hasCJK ? baseCols * 2 : baseCols
+  const cols = hasCJK ? baseCols * metrics.fullCells : baseCols
   const cellW = canvas.width / cols
   const cellH = cellW * metrics.charAspect
   const rows = Math.ceil(canvas.height / cellH)
@@ -292,7 +308,8 @@ function generateBigWord(
   // 计算字符占用的 cell 数
   const cellStep = (ch: string): number => {
     if (!hasCJK) return 1
-    return charCellWidth(ch)
+    if (ch === " " || ch === "\u3000") return metrics.spaceCells
+    return metrics.fullCells
   }
 
   const out: string[] = []
@@ -801,15 +818,20 @@ export default function Home() {
     if (!text) return
     const lines = text.split("\n")
 
-    // 计算每行的视觉宽度（半角 cell 数）
+    // 计算每行的视觉宽度（cell 数）
     const lineWidth = (line: string): number =>
-      [...line].reduce((sum, ch) => sum + (hasCJK ? charCellWidth(ch) : 1), 0)
+      [...line].reduce((sum, ch) => {
+        if (!hasCJK) return sum + 1
+        if (ch === " " || ch === "\u3000") return sum + cellMetrics.spaceCells
+        return sum + cellMetrics.fullCells
+      }, 0)
     const maxCols = Math.max(...lines.map(lineWidth))
     if (maxCols === 0) return
 
     // 高清导出：渲染分辨率为显示尺寸的 4 倍
     const SCALE = 4
     const lineH = fontSize * SCALE
+    // charW = 一个 cell 的渲染宽度 = fontSize / charAspect
     const charW = (cellMetrics.charAspect ? fontSize / cellMetrics.charAspect : fontSize * 0.6) * SCALE
     const padding = 24 * SCALE
     const canvas = document.createElement("canvas")
@@ -822,7 +844,7 @@ export default function Home() {
     ctx.fillStyle = bgColor
     ctx.fillRect(0, 0, canvas.width, canvas.height)
 
-    // Text — 按字符实际宽度推进 x 坐标
+    // Text — 按字符实际 cell 数推进 x 坐标
     ctx.fillStyle = textColor
     ctx.font = `700 ${fontSize * SCALE}px ${sourceFont.stack}`
     ctx.textBaseline = "top"
@@ -831,7 +853,11 @@ export default function Home() {
       let x = padding
       for (const ch of [...line]) {
         ctx.fillText(ch, x, padding + i * lineH)
-        x += charW * (hasCJK ? charCellWidth(ch) : 1)
+        let step = 1
+        if (hasCJK) {
+          step = (ch === " " || ch === "\u3000") ? cellMetrics.spaceCells : cellMetrics.fullCells
+        }
+        x += charW * step
       }
     })
 
