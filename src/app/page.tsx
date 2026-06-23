@@ -129,6 +129,25 @@ function containsCJK(text: string): boolean {
 }
 
 /* ============================================================
+   Fullwidth conversion — when source contains CJK, convert all
+   half-width ASCII (letters, digits, punctuation, space) to their
+   fullwidth equivalents so every character has identical width.
+   This is what makes mixed CJK+English+numbers align perfectly.
+   ============================================================ */
+
+function toFullwidth(ch: string): string {
+  const code = ch.codePointAt(0)
+  if (code === undefined) return ch
+  // Space → ideographic space (U+3000)
+  if (code === 0x20) return "\u3000"
+  // ASCII printable (0x21..0x7E) → fullwidth (U+FF01..U+FF5E)
+  if (code >= 0x21 && code <= 0x7e) {
+    return String.fromCodePoint(code + 0xfee0)
+  }
+  return ch
+}
+
+/* ============================================================
    Cell metrics — measure actual character width of the chosen
    source font. If source contains CJK, measure a CJK glyph
    (which is full-width / square) and use ideographic space
@@ -141,7 +160,7 @@ interface CellMetrics {
 }
 
 function measureCellMetrics(fontStack: string, hasCJK: boolean): CellMetrics {
-  const fallback: CellMetrics = { charAspect: 1.67, emptyChar: " " }
+  const fallback: CellMetrics = { charAspect: 1.0, emptyChar: " " }
   if (typeof window === "undefined") return fallback
   try {
     const probe = document.createElement("span")
@@ -151,16 +170,21 @@ function measureCellMetrics(fontStack: string, hasCJK: boolean): CellMetrics {
       `letter-spacing:0;line-height:1;`
     document.body.appendChild(probe)
 
-    // Use a representative character: CJK glyph for CJK content, 'M' for ASCII
-    probe.textContent = hasCJK ? "\u5b57" : "M"
-    const charW = probe.getBoundingClientRect().width
-
-    document.body.removeChild(probe)
-    if (!charW || !isFinite(charW)) return fallback
-
-    return {
-      charAspect: 100 / charW,
-      emptyChar: hasCJK ? "\u3000" : " ",
+    if (hasCJK) {
+      // Measure a CJK character — it's full-width (square-ish).
+      // All source chars will be converted to fullwidth, so they share this width.
+      probe.textContent = "\u5b57"
+      const cjkW = probe.getBoundingClientRect().width
+      document.body.removeChild(probe)
+      if (!cjkW || !isFinite(cjkW)) return { charAspect: 1.0, emptyChar: "\u3000" }
+      return { charAspect: 100 / cjkW, emptyChar: "\u3000" }
+    } else {
+      // Pure ASCII — measure 'M' in the source font
+      probe.textContent = "M"
+      const asciiW = probe.getBoundingClientRect().width
+      document.body.removeChild(probe)
+      if (!asciiW || !isFinite(asciiW)) return fallback
+      return { charAspect: 100 / asciiW, emptyChar: " " }
     }
   } catch {
     return fallback
@@ -174,15 +198,14 @@ function measureCellMetrics(fontStack: string, hasCJK: boolean): CellMetrics {
 function generateBigWord(
   source: string,
   target: string,
-  density: number,
   targetFontStack: string,
   metrics: CellMetrics,
   targetBaseSize: number,
   preventTruncation: boolean,
+  hasCJK: boolean,
 ): string {
-  const src = [...source]
   const tgt = target
-  if (src.length === 0 || tgt.trim().length === 0) return ""
+  if (source.length === 0 || tgt.trim().length === 0) return ""
 
   const canvas = document.createElement("canvas")
   const ctx = canvas.getContext("2d")
@@ -211,8 +234,9 @@ function generateBigWord(
 
   const img = ctx.getImageData(0, 0, canvas.width, canvas.height).data
 
-  const scaleFactor = baseFont / 320
-  const cols = Math.max(8, Math.round(density * scaleFactor))
+  // 列数由目标字号决定（密度冗余，已移除）
+  // baseFont=320 → cols=120（与之前默认值一致）
+  const cols = Math.max(8, Math.round(baseFont * 0.375))
   const cellW = canvas.width / cols
   const cellH = cellW * metrics.charAspect
   const rows = Math.ceil(canvas.height / cellH)
@@ -234,24 +258,37 @@ function generateBigWord(
     darkGrid.push(row)
   }
 
+  // 准备素材字符：CJK 模式下转换为全角，保证每个字符等宽
+  const convertChar = (ch: string): string => hasCJK ? toFullwidth(ch) : ch
+  const spaceChar = hasCJK ? "\u3000" : " "
+
   const out: string[] = []
 
   if (preventTruncation) {
-    // 防截断模式：以空格分割素材为"词"，词之间插入空格分隔符
-    // 每个"词"不可被截断；词与词之间用一个空格分隔（空格也占一个暗像素位）
-    const words = source.split(/\s+/).filter((w) => w.length > 0).map((w) => [...w])
+    // 防截断模式：以空格分割素材为"词"
+    // 规则：
+    //   1. 每个词必须完整输出，不可截断
+    //   2. 词与词之间至少 1 个空格（循环边界也补充空格）
+    //   3. 空格个数可根据渲染需要调整（行尾填空格对齐）
+    const words = source.split(/\s+/).filter((w) => w.length > 0)
     if (words.length === 0) return ""
 
-    // 构建令牌流：word1, space, word2, space, word3, ...
-    // 空格令牌占 1 个暗像素，作为词间分隔
+    // 将每个词转为字符数组（CJK 模式下转全角）
+    const wordChars: string[][] = words.map((w) => [...w].map(convertChar))
+    const spaceToken = spaceChar // 词间分隔符（1 个空格单元）
+
+    // 令牌流：word1, space, word2, space, ..., wordN, space, word1, space, ...
+    // 注意：最后一个词后面也有 space，保证循环边界有空格分隔
     interface Token { chars: string[]; isSpace: boolean }
-    const tokens: Token[] = []
-    for (let i = 0; i < words.length; i++) {
-      tokens.push({ chars: words[i], isSpace: false })
-      if (i < words.length - 1) {
-        tokens.push({ chars: [" "], isSpace: true })
+    const buildTokens = (): Token[] => {
+      const ts: Token[] = []
+      for (let i = 0; i < wordChars.length; i++) {
+        ts.push({ chars: wordChars[i], isSpace: false })
+        ts.push({ chars: [spaceToken], isSpace: true })
       }
+      return ts
     }
+    const tokens = buildTokens()
 
     let tokenIdx = 0
     let charInToken = 0
@@ -276,7 +313,7 @@ function generateBigWord(
         const remainingDark = darkCols.length - darkPtr
 
         if (remainingToken <= remainingDark) {
-          // 令牌可以完整放入当前行剩余暗像素
+          // 令牌完整放入当前行剩余暗像素
           for (let i = 0; i < remainingToken; i++) {
             rowChars[darkCols[darkPtr]] = token.chars[charInToken + i]
             darkPtr++
@@ -301,6 +338,7 @@ function generateBigWord(
     }
   } else {
     // 普通模式：逐字符循环填充
+    const src = [...source].map(convertChar)
     let idx = 0
     for (let r = 0; r < rows; r++) {
       const rowChars: string[] = []
@@ -557,7 +595,6 @@ function FontPicker({
 export default function Home() {
   const [source, setSource] = useState("鳖鳖")
   const [target, setTarget] = useState("赖疙宝")
-  const [density, setDensity] = useState(120)
   const [fontSize, setFontSize] = useState(10)
   const [targetFontSize, setTargetFontSize] = useState(320)
   const [targetFontId, setTargetFontId] = useState("yahei")
@@ -593,9 +630,9 @@ export default function Home() {
   const recompute = useCallback(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current)
     debounceRef.current = setTimeout(() => {
-      setArt(generateBigWord(source, target, density, targetFont.stack, cellMetrics, targetFontSize, preventTruncation))
+      setArt(generateBigWord(source, target, targetFont.stack, cellMetrics, targetFontSize, preventTruncation, hasCJK))
     }, 110)
-  }, [source, target, density, targetFont.stack, cellMetrics, targetFontSize, preventTruncation])
+  }, [source, target, targetFont.stack, cellMetrics, targetFontSize, preventTruncation, hasCJK])
 
   useEffect(() => {
     recompute()
@@ -647,7 +684,7 @@ export default function Home() {
       const res = await fetch("/bigword", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ source, target, cols: density }),
+        body: JSON.stringify({ source, target, cols: Math.round(targetFontSize * 0.375) }),
       })
       const data = await res.json()
       setEdgeResult({
@@ -701,7 +738,8 @@ export default function Home() {
 
     // Render to an offscreen canvas
     const lineH = fontSize * 1.0
-    const charW = fontSize * (cellMetrics.charAspect ? 1 / cellMetrics.charAspect : 0.6)
+    // charAspect = cellH/cellW, so charW = fontSize / charAspect
+    const charW = cellMetrics.charAspect ? fontSize / cellMetrics.charAspect : fontSize * 0.6
     const padding = 24
     const canvas = document.createElement("canvas")
     canvas.width = Math.ceil(maxCols * charW + padding * 2)
@@ -745,7 +783,6 @@ export default function Home() {
   const handleReset = () => {
     setSource("鳖鳖")
     setTarget("赖疙宝")
-    setDensity(120)
     setFontSize(10)
     setTargetFontSize(320)
     setTargetFontId("yahei")
@@ -940,26 +977,6 @@ export default function Home() {
                   scanError={scanError}
                 />
               </div>
-            </div>
-
-            {/* Row 2b: 密度 (单独一行) */}
-            <div className="mt-4">
-              <div className="flex items-center justify-between">
-                <label className="text-xs text-slate-500 font-medium flex items-center gap-1.5">
-                  <Grid3x3 className="w-3.5 h-3.5 text-indigo-500" />
-                  密度
-                </label>
-                <span className="stat-chip">{density}</span>
-              </div>
-              <input
-                type="range"
-                min={40}
-                max={240}
-                step={2}
-                value={density}
-                onChange={(e) => setDensity(Number(e.target.value))}
-                className="tool-slider mt-2.5"
-              />
             </div>
 
             {/* Row 2c: 小字字号 | 目标字号 — 始终同行 */}
