@@ -8,6 +8,7 @@ import {
   Zap,
   Copy,
   Download,
+  Image as ImageIcon,
   Shuffle,
   RotateCcw,
   Cloud,
@@ -95,14 +96,19 @@ const TEXT_COLORS = [
   { id: "lime", value: "#a3e635" },
 ]
 
-const PRESETS: { source: string; target: string; label: string; font: string; sourceFont?: string }[] = [
-  { source: "Hello World!", target: "HI", label: "HI", font: "arial" },
-  { source: "EdgeOne Edge Function Python Cloud", target: "EDGE", label: "EDGE", font: "impact" },
-  { source: "用字符堆叠出大字的视觉效果拼字艺术", target: "大字", label: "大字", font: "yahei", sourceFont: "yahei" },
-  { source: "0123456789", target: "2026", label: "2026", font: "arial" },
-  { source: "代码改变世界", target: "CODE", label: "CODE", font: "courier" },
-  { source: "春风又绿江南岸明月何时照我还", target: "春", label: "春", font: "kaiti", sourceFont: "kaiti" },
+const BG_COLORS = [
+  { id: "slate-900", value: "#0f172a" },
+  { id: "black", value: "#000000" },
+  { id: "slate-800", value: "#1e293b" },
+  { id: "indigo-950", value: "#1e1b4b" },
+  { id: "emerald-950", value: "#022c22" },
+  { id: "rose-950", value: "#4c0519" },
+  { id: "white", value: "#ffffff" },
+  { id: "slate-100", value: "#f1f5f9" },
 ]
+
+const PRESETS: { source: string; target: string; label: string; font: string; sourceFont?: string }[] = []
+
 
 /* ============================================================
    CJK detection — cheap character-code check, no DOM needed
@@ -179,6 +185,7 @@ function generateBigWord(
   density: number,
   targetFontStack: string,
   metrics: CellMetrics,
+  targetBaseSize: number,
 ): string {
   const src = [...source.replace(/\s+/g, "")]
   const tgt = target
@@ -188,7 +195,7 @@ function generateBigWord(
   const ctx = canvas.getContext("2d")
   if (!ctx) return ""
 
-  const baseFont = 320
+  const baseFont = Math.max(40, targetBaseSize)
   const fontStack = `900 ${baseFont}px ${targetFontStack}`
   ctx.font = fontStack
 
@@ -320,14 +327,20 @@ function FontPicker({
       if (popoverRef.current?.contains(t)) return
       setOpen(false)
     }
-    const close = () => setOpen(false)
+    // Close on scroll OUTSIDE the popover; scrolling INSIDE the list should NOT close it
+    const onScroll = (e: Event) => {
+      const t = e.target as Node
+      if (popoverRef.current?.contains(t)) return
+      setOpen(false)
+    }
+    const onResize = () => setOpen(false)
     document.addEventListener("mousedown", handler)
-    window.addEventListener("scroll", close, true)
-    window.addEventListener("resize", close)
+    window.addEventListener("scroll", onScroll, true)
+    window.addEventListener("resize", onResize)
     return () => {
       document.removeEventListener("mousedown", handler)
-      window.removeEventListener("scroll", close, true)
-      window.removeEventListener("resize", close)
+      window.removeEventListener("scroll", onScroll, true)
+      window.removeEventListener("resize", onResize)
     }
   }, [open])
 
@@ -470,13 +483,15 @@ function FontPicker({
    ============================================================ */
 
 export default function Home() {
-  const [source, setSource] = useState("Hello EdgeOne!")
-  const [target, setTarget] = useState("HI")
+  const [source, setSource] = useState("鳖鳖")
+  const [target, setTarget] = useState("赖疙宝")
   const [density, setDensity] = useState(120)
   const [fontSize, setFontSize] = useState(10)
-  const [targetFontId, setTargetFontId] = useState("arial")
-  const [sourceFontId, setSourceFontId] = useState("sys-mono")
+  const [targetFontSize, setTargetFontSize] = useState(320)
+  const [targetFontId, setTargetFontId] = useState("yahei")
+  const [sourceFontId, setSourceFontId] = useState("yahei")
   const [textColor, setTextColor] = useState("#818cf8")
+  const [bgColor, setBgColor] = useState("#0f172a")
   const [art, setArt] = useState("")
   const [tab, setTab] = useState<"live" | "edge">("live")
   const [edgeResult, setEdgeResult] = useState<EdgeResult | null>(null)
@@ -505,9 +520,9 @@ export default function Home() {
   const recompute = useCallback(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current)
     debounceRef.current = setTimeout(() => {
-      setArt(generateBigWord(source, target, density, targetFont.stack, cellMetrics))
+      setArt(generateBigWord(source, target, density, targetFont.stack, cellMetrics, targetFontSize))
     }, 110)
-  }, [source, target, density, targetFont.stack, cellMetrics])
+  }, [source, target, density, targetFont.stack, cellMetrics, targetFontSize])
 
   useEffect(() => {
     recompute()
@@ -591,7 +606,7 @@ export default function Home() {
     } catch { /* ignore */ }
   }
 
-  const handleDownload = () => {
+  const handleDownloadTxt = () => {
     const text = tab === "edge" ? edgeResult?.art ?? "" : art
     if (!text) return
     const blob = new Blob([text], { type: "text/plain;charset=utf-8" })
@@ -603,6 +618,50 @@ export default function Home() {
     URL.revokeObjectURL(url)
   }
 
+  const handleExportPNG = () => {
+    const text = tab === "edge" ? edgeResult?.art ?? "" : art
+    if (!text) return
+    const lines = text.split("\n")
+    const maxCols = Math.max(...lines.map((l) => [...l].length))
+    if (maxCols === 0) return
+
+    // Render to an offscreen canvas
+    const lineH = fontSize * 1.0
+    const charW = fontSize * (cellMetrics.charAspect ? 1 / cellMetrics.charAspect : 0.6)
+    const padding = 24
+    const canvas = document.createElement("canvas")
+    canvas.width = Math.ceil(maxCols * charW + padding * 2)
+    canvas.height = Math.ceil(lines.length * lineH + padding * 2)
+    const ctx = canvas.getContext("2d")
+    if (!ctx) return
+
+    // Background
+    ctx.fillStyle = bgColor
+    ctx.fillRect(0, 0, canvas.width, canvas.height)
+
+    // Text
+    ctx.fillStyle = textColor
+    ctx.font = `700 ${fontSize}px ${sourceFont.stack}`
+    ctx.textBaseline = "top"
+    ctx.textAlign = "left"
+    lines.forEach((line, i) => {
+      const chars = [...line]
+      chars.forEach((ch, j) => {
+        ctx.fillText(ch, padding + j * charW, padding + i * lineH)
+      })
+    })
+
+    canvas.toBlob((blob) => {
+      if (!blob) return
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement("a")
+      a.href = url
+      a.download = `bigword-${target || "output"}.png`
+      a.click()
+      URL.revokeObjectURL(url)
+    }, "image/png")
+  }
+
   const handleShuffle = () => {
     setSource((s) =>
       [...s].map((c) => ({ c, k: Math.random() })).sort((a, b) => a.k - b.k).map((x) => x.c).join(""),
@@ -610,13 +669,15 @@ export default function Home() {
   }
 
   const handleReset = () => {
-    setSource("Hello EdgeOne!")
-    setTarget("HI")
+    setSource("鳖鳖")
+    setTarget("赖疙宝")
     setDensity(120)
     setFontSize(10)
-    setTargetFontId("arial")
-    setSourceFontId("sys-mono")
+    setTargetFontSize(320)
+    setTargetFontId("yahei")
+    setSourceFontId("yahei")
     setTextColor("#818cf8")
+    setBgColor("#0f172a")
   }
 
   const applyPreset = (p: { source: string; target: string; font: string; sourceFont?: string }) => {
@@ -643,57 +704,59 @@ export default function Home() {
 
       {/* Header */}
       <header className="header-border sticky top-0 z-30">
-        <div className="max-w-7xl mx-auto px-6 py-3.5 flex items-center justify-between">
-          <div className="flex items-center gap-2.5">
-            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-indigo-500 to-violet-500 flex items-center justify-center shadow-lg shadow-indigo-500/30">
-              <Type className="w-5 h-5 text-white" />
+        <div className="max-w-7xl mx-auto px-6 py-2 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-indigo-500 to-violet-500 flex items-center justify-center shadow-md shadow-indigo-500/30">
+              <Type className="w-4 h-4 text-white" />
             </div>
             <div>
-              <span className="font-extrabold text-lg tracking-tight text-slate-900">BigWord</span>
-              <span className="text-xs text-slate-400 ml-1.5 hidden sm:inline">文本拼字艺术</span>
+              <span className="font-extrabold text-base tracking-tight text-slate-900">BigWord</span>
+              <span className="text-xs text-slate-400 ml-1.5 hidden sm:inline">字符画</span>
             </div>
           </div>
-          <a
-            href="https://github.com/sxwzxc/bigword"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-slate-400 hover:text-indigo-600 transition-colors p-2"
-            aria-label="GitHub"
-          >
-            <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-              <path fillRule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z" clipRule="evenodd" />
-            </svg>
-          </a>
+          <div className="flex items-center gap-3">
+            <span className="text-xs text-slate-400 hidden sm:inline">
+              by <span className="font-semibold text-slate-600">sxwzxc</span>
+            </span>
+            <a
+              href="https://github.com/sxwzxc/bigword"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-slate-400 hover:text-indigo-600 transition-colors p-1"
+              aria-label="GitHub"
+            >
+              <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                <path fillRule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z" clipRule="evenodd" />
+              </svg>
+            </a>
+          </div>
         </div>
       </header>
 
       <main className="max-w-7xl mx-auto px-6 py-8 md:py-12">
         {/* Hero */}
         <div className="text-center mb-6 animate-fade-in-up">
-          <h1 className="text-4xl md:text-6xl font-black leading-tight mb-3">
+          <h1 className="text-4xl md:text-6xl font-black leading-tight">
             <span className="bg-clip-text text-transparent bg-gradient-to-r from-indigo-500 via-pink-500 to-amber-500">
-              用字符，拼出大字
+              字符画
             </span>
           </h1>
-          <p className="text-sm md:text-base text-slate-500 max-w-2xl mx-auto leading-relaxed">
-            输入<span className="text-indigo-600 font-semibold">素材文本</span>与
-            <span className="text-pink-500 font-semibold">目标文本</span>，系统将素材字符重复排列，
-            在视觉上还原目标文本形态 —— ASCII Art 风格的拼字效果。
-          </p>
         </div>
 
         {/* Presets */}
-        <div className="flex flex-wrap gap-2 justify-center mb-6 animate-fade-in-up animation-delay-100">
-          {PRESETS.map((p) => (
-            <button
-              key={p.label}
-              onClick={() => applyPreset(p)}
-              className="px-3.5 py-1.5 rounded-full text-xs font-mono font-semibold border border-slate-200 bg-white text-slate-600 hover:border-indigo-400 hover:text-indigo-600 hover:bg-indigo-50 transition-colors cursor-pointer shadow-sm"
-            >
-              {p.label}
-            </button>
-          ))}
-        </div>
+        {PRESETS.length > 0 && (
+          <div className="flex flex-wrap gap-2 justify-center mb-6 animate-fade-in-up animation-delay-100">
+            {PRESETS.map((p) => (
+              <button
+                key={p.label}
+                onClick={() => applyPreset(p)}
+                className="px-3.5 py-1.5 rounded-full text-xs font-mono font-semibold border border-slate-200 bg-white text-slate-600 hover:border-indigo-400 hover:text-indigo-600 hover:bg-indigo-50 transition-colors cursor-pointer shadow-sm"
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
+        )}
 
         {/* Controls — full width, horizontal layout */}
         <Card className="flat-card border-0 shadow-sm mb-5 animate-fade-in-up animation-delay-100">
@@ -814,12 +877,12 @@ export default function Home() {
                 />
               </div>
 
-              {/* Font size */}
+              {/* Source font size */}
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between">
                   <label className="text-xs text-slate-500 font-medium flex items-center gap-1.5">
                     <Type className="w-3.5 h-3.5 text-amber-500" />
-                    字号
+                    小字字号
                   </label>
                   <span className="stat-chip">{fontSize}px</span>
                 </div>
@@ -835,25 +898,73 @@ export default function Home() {
               </div>
             </div>
 
+            {/* Row 2b: Target font size (full width row) */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs text-slate-500 font-medium flex items-center gap-1.5">
+                    <Type className="w-3.5 h-3.5 text-indigo-500" />
+                    目标字号 <span className="text-slate-400">· 大字渲染尺寸</span>
+                  </label>
+                  <span className="stat-chip">{targetFontSize}px</span>
+                </div>
+                <input
+                  type="range"
+                  min={80}
+                  max={600}
+                  step={10}
+                  value={targetFontSize}
+                  onChange={(e) => setTargetFontSize(Number(e.target.value))}
+                  className="tool-slider mt-2.5"
+                />
+              </div>
+            </div>
+
             {/* Row 3: Colors + Actions */}
             <div className="flex flex-wrap items-center justify-between gap-4 mt-4 pt-4 border-t border-slate-100">
-              <div className="flex items-center gap-3">
-                <span className="text-xs text-slate-500 font-medium flex items-center gap-1.5">
-                  <Palette className="w-3.5 h-3.5 text-pink-500" />
-                  颜色
-                </span>
-                <div className="flex flex-wrap gap-2">
-                  {TEXT_COLORS.map((c) => (
-                    <button
-                      key={c.id}
-                      onClick={() => setTextColor(c.value)}
-                      className={`color-swatch ${textColor === c.value ? "color-swatch-active" : ""}`}
-                      style={{ backgroundColor: c.value }}
-                      aria-label={`颜色 ${c.id}`}
-                    >
-                      {textColor === c.value && <Check className="w-3.5 h-3.5 text-slate-800" />}
-                    </button>
-                  ))}
+              <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
+                {/* Text color */}
+                <div className="flex items-center gap-3">
+                  <span className="text-xs text-slate-500 font-medium flex items-center gap-1.5">
+                    <Palette className="w-3.5 h-3.5 text-pink-500" />
+                    文字色
+                  </span>
+                  <div className="flex flex-wrap gap-2">
+                    {TEXT_COLORS.map((c) => (
+                      <button
+                        key={c.id}
+                        onClick={() => setTextColor(c.value)}
+                        className={`color-swatch ${textColor === c.value ? "color-swatch-active" : ""}`}
+                        style={{ backgroundColor: c.value }}
+                        aria-label={`文字颜色 ${c.id}`}
+                      >
+                        {textColor === c.value && <Check className="w-3.5 h-3.5 text-slate-800" />}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Background color */}
+                <div className="flex items-center gap-3">
+                  <span className="text-xs text-slate-500 font-medium flex items-center gap-1.5">
+                    <Grid3x3 className="w-3.5 h-3.5 text-slate-400" />
+                    背景色
+                  </span>
+                  <div className="flex flex-wrap gap-2">
+                    {BG_COLORS.map((c) => (
+                      <button
+                        key={c.id}
+                        onClick={() => setBgColor(c.value)}
+                        className={`color-swatch ${bgColor === c.value ? "color-swatch-active" : ""}`}
+                        style={{ backgroundColor: c.value, border: c.value === "#ffffff" || c.value === "#f1f5f9" ? "2px solid #e2e8f0" : undefined }}
+                        aria-label={`背景颜色 ${c.id}`}
+                      >
+                        {bgColor === c.value && (
+                          <Check className={`w-3.5 h-3.5 ${c.value === "#ffffff" || c.value === "#f1f5f9" ? "text-slate-800" : "text-white"}`} />
+                        )}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
               <button
@@ -899,11 +1010,18 @@ export default function Home() {
                   {copied ? "已复制" : "复制"}
                 </Button>
                 <Button
-                  size="sm" variant="ghost" onClick={handleDownload} disabled={!displayArt}
+                  size="sm" variant="ghost" onClick={handleDownloadTxt} disabled={!displayArt}
                   className="text-slate-500 hover:text-indigo-600 cursor-pointer h-8"
                 >
                   <Download className="w-3.5 h-3.5 mr-1" />
-                  下载
+                  下载 TXT
+                </Button>
+                <Button
+                  size="sm" variant="ghost" onClick={handleExportPNG} disabled={!displayArt}
+                  className="text-slate-500 hover:text-indigo-600 cursor-pointer h-8"
+                >
+                  <ImageIcon className="w-3.5 h-3.5 mr-1" />
+                  导出 PNG
                 </Button>
               </div>
             </div>
@@ -919,7 +1037,7 @@ export default function Home() {
             )}
 
             {/* Preview area — taller for wider layout */}
-            <div className="preview-wrap" style={{ maxHeight: "70vh" }}>
+            <div className="preview-wrap" style={{ maxHeight: "70vh", backgroundColor: bgColor }}>
               {displayArt ? (
                 <pre
                   className="preview-canvas"
@@ -928,8 +1046,8 @@ export default function Home() {
                   {displayArt}
                 </pre>
               ) : (
-                <div className="preview-empty">
-                  <Type className="w-12 h-12 mx-auto mb-3 text-slate-700" />
+                <div className="preview-empty" style={{ color: bgColor === "#ffffff" || bgColor === "#f1f5f9" ? "#64748b" : "#475569" }}>
+                  <Type className="w-12 h-12 mx-auto mb-3 opacity-40" />
                   <p>输入素材文本与目标文本，开始生成拼字效果</p>
                 </div>
               )}
