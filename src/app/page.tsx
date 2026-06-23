@@ -178,8 +178,8 @@ function generateBigWord(
   targetFontStack: string,
   metrics: CellMetrics,
   targetBaseSize: number,
+  preventTruncation: boolean,
 ): string {
-  // 保留素材中的所有字符（含空格），仅过滤纯空白行末尾
   const src = [...source]
   const tgt = target
   if (src.length === 0 || tgt.trim().length === 0) return ""
@@ -211,18 +211,16 @@ function generateBigWord(
 
   const img = ctx.getImageData(0, 0, canvas.width, canvas.height).data
 
-  // 目标字号影响输出大小：以 320 为基准缩放列数，
-  // 这样目标字号越大 → 采样列数越多 → 拼出的大字整体越大
   const scaleFactor = baseFont / 320
   const cols = Math.max(8, Math.round(density * scaleFactor))
   const cellW = canvas.width / cols
   const cellH = cellW * metrics.charAspect
   const rows = Math.ceil(canvas.height / cellH)
 
-  const out: string[] = []
-  let idx = 0
+  // Step 1: sample all pixels into a dark/light grid
+  const darkGrid: boolean[][] = []
   for (let r = 0; r < rows; r++) {
-    const rowChars: string[] = []
+    const row: boolean[] = []
     for (let c = 0; c < cols; c++) {
       const x = Math.floor((c + 0.5) * cellW)
       const y = Math.floor((r + 0.5) * cellH)
@@ -231,17 +229,83 @@ function generateBigWord(
         const p = (y * canvas.width + x) * 4
         bright = (img[p] + img[p + 1] + img[p + 2]) / 3
       }
-      if (bright < 140) {
-        // 循环使用：素材完全用完一遍后（idx 达到 src.length）才回到开头
-        rowChars.push(src[idx % src.length])
-        idx++
-      } else {
-        rowChars.push(metrics.emptyChar)
-      }
+      row.push(bright < 140)
     }
-    // Trim trailing whitespace (handles both regular space and ideographic space U+3000)
-    out.push(rowChars.join("").replace(/[\s\u3000]+$/, ""))
+    darkGrid.push(row)
   }
+
+  const out: string[] = []
+
+  if (preventTruncation) {
+    // 防截断模式：以空格分割素材为"词"，每个词不可被截断
+    // 若当前行剩余暗像素不足以放下整个词，则用空格填充剩余暗像素，词在下一行开始
+    const words = source.split(/\s+/).filter((w) => w.length > 0).map((w) => [...w])
+    if (words.length === 0) return ""
+
+    let wordIdx = 0
+    let charInWord = 0 // 当前词内已放置的字符偏移（用于超长词跨行续接）
+
+    for (let r = 0; r < rows; r++) {
+      // 收集本行所有暗像素列号
+      const darkCols: number[] = []
+      for (let c = 0; c < cols; c++) {
+        if (darkGrid[r][c]) darkCols.push(c)
+      }
+
+      const rowChars: string[] = new Array(cols).fill(metrics.emptyChar)
+      let darkPtr = 0
+
+      while (darkPtr < darkCols.length) {
+        if (wordIdx >= words.length) {
+          wordIdx = 0
+          charInWord = 0
+        }
+
+        const word = words[wordIdx]
+        const remainingWord = word.length - charInWord
+        const remainingDark = darkCols.length - darkPtr
+
+        if (remainingWord <= remainingDark) {
+          // 词可以完整放入当前行剩余暗像素
+          for (let i = 0; i < remainingWord; i++) {
+            rowChars[darkCols[darkPtr]] = word[charInWord + i]
+            darkPtr++
+          }
+          wordIdx++
+          charInWord = 0
+        } else if (remainingWord > darkCols.length) {
+          // 词比整行暗像素还长——无法不截断，强制跨行续接
+          for (let i = 0; i < remainingDark; i++) {
+            rowChars[darkCols[darkPtr]] = word[charInWord + i]
+            darkPtr++
+          }
+          charInWord += remainingDark
+          break // 去下一行继续
+        } else {
+          // 词能放入完整行但放不进剩余空间——填充空格，词移至下一行
+          break
+        }
+      }
+
+      out.push(rowChars.join("").replace(/[\s\u3000]+$/, ""))
+    }
+  } else {
+    // 普通模式：逐字符循环填充
+    let idx = 0
+    for (let r = 0; r < rows; r++) {
+      const rowChars: string[] = []
+      for (let c = 0; c < cols; c++) {
+        if (darkGrid[r][c]) {
+          rowChars.push(src[idx % src.length])
+          idx++
+        } else {
+          rowChars.push(metrics.emptyChar)
+        }
+      }
+      out.push(rowChars.join("").replace(/[\s\u3000]+$/, ""))
+    }
+  }
+
   return out.join("\n")
 }
 
@@ -490,6 +554,7 @@ export default function Home() {
   const [sourceFontId, setSourceFontId] = useState("yahei")
   const [textColor, setTextColor] = useState("#818cf8")
   const [bgColor, setBgColor] = useState("#0f172a")
+  const [preventTruncation, setPreventTruncation] = useState(false)
   const [art, setArt] = useState("")
   const [tab, setTab] = useState<"live" | "edge">("live")
   const [edgeResult, setEdgeResult] = useState<EdgeResult | null>(null)
@@ -518,9 +583,9 @@ export default function Home() {
   const recompute = useCallback(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current)
     debounceRef.current = setTimeout(() => {
-      setArt(generateBigWord(source, target, density, targetFont.stack, cellMetrics, targetFontSize))
+      setArt(generateBigWord(source, target, density, targetFont.stack, cellMetrics, targetFontSize, preventTruncation))
     }, 110)
-  }, [source, target, density, targetFont.stack, cellMetrics, targetFontSize])
+  }, [source, target, density, targetFont.stack, cellMetrics, targetFontSize, preventTruncation])
 
   useEffect(() => {
     recompute()
@@ -677,6 +742,7 @@ export default function Home() {
     setSourceFontId("yahei")
     setTextColor("#818cf8")
     setBgColor("#0f172a")
+    setPreventTruncation(false)
   }
 
   const applyPreset = (p: { source: string; target: string; font: string; sourceFont?: string }) => {
@@ -779,6 +845,15 @@ export default function Home() {
                         CJK
                       </span>
                     )}
+                    <label className="flex items-center gap-1 cursor-pointer select-none text-xs text-slate-500 hover:text-indigo-600 transition-colors" title="勾选后以空格分割素材为词，每个词不会被截断">
+                      <input
+                        type="checkbox"
+                        checked={preventTruncation}
+                        onChange={(e) => setPreventTruncation(e.target.checked)}
+                        className="w-3.5 h-3.5 rounded border-slate-300 text-indigo-500 cursor-pointer accent-indigo-500"
+                      />
+                      防截断
+                    </label>
                     <button
                       onClick={handleShuffle}
                       className="text-slate-400 hover:text-amber-500 transition-colors p-1.5 rounded-lg hover:bg-amber-50 cursor-pointer"
