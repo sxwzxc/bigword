@@ -315,23 +315,15 @@ function generateBigWord(
   const out: string[] = []
 
   if (preventTruncation) {
-    // 防截断模式：以空格分割素材为"词"
-    // 每个词必须完整放入一个连续暗像素段（不跨间隙）
+    // 防截断模式：以空格分割素材为"词"，每个词尽量完整放入连续暗像素段。
+    // 对于过短段（撇捺等斜线的细片段），回退到逐字符填充，保证斜线连续不弯曲。
     const words = source.split(/\s+/).filter((w) => w.length > 0)
     if (words.length === 0) return ""
 
-    const wordChars: string[][] = words.map((w) => [...w].map(convertChar))
-
-    // 令牌流：word1, space, word2, space, ..., wordN, space
-    interface Token { chars: string[]; isSpace: boolean; cellLen: number }
-    const tokens: Token[] = []
-    for (let i = 0; i < wordChars.length; i++) {
-      // 词的 cell 长度 = 各字符 cell 宽度之和
-      const cellLen = wordChars[i].reduce((sum, ch) => sum + cellStep(ch), 0)
-      tokens.push({ chars: wordChars[i], isSpace: false, cellLen })
-      // 词间空格令牌（半角，占 1 cell）
-      tokens.push({ chars: [" "], isSpace: true, cellLen: 1 })
-    }
+    const wordTokens = words.map((w) => {
+      const chars = [...w].map(convertChar)
+      return { chars, cellLen: chars.reduce((sum, ch) => sum + cellStep(ch), 0) }
+    })
 
     // 找出一行中的连续暗像素段
     const findSegments = (row: boolean[]): number[][] => {
@@ -349,63 +341,76 @@ function generateBigWord(
       return segs
     }
 
-    // 预计算最大段长度
-    let maxSegLen = 0
-    for (let r = 0; r < rows; r++) {
-      for (const seg of findSegments(darkGrid[r])) {
-        if (seg.length > maxSegLen) maxSegLen = seg.length
+    // 合并相距很近的段——斜线笔画常有 1-2 cell 的采样间隙，合并后可容纳完整词
+    const mergeGap = Math.max(1, metrics.fullCells)
+    const mergeSegments = (segs: number[][]): number[][] => {
+      if (segs.length <= 1) return segs
+      const result: number[][] = [segs[0].slice()]
+      for (let i = 1; i < segs.length; i++) {
+        const prev = result[result.length - 1]
+        const gap = segs[i][0] - prev[prev.length - 1] - 1
+        if (gap > 0 && gap <= mergeGap) {
+          for (let c = prev[prev.length - 1] + 1; c < segs[i][0]; c++) prev.push(c)
+          for (const c of segs[i]) prev.push(c)
+        } else {
+          result.push(segs[i].slice())
+        }
       }
-    }
-    if (maxSegLen === 0) return ""
-
-    let tokenIdx = 0
-
-    const advanceToValidToken = () => {
-      let guard = 0
-      while (guard < tokens.length * 2) {
-        if (tokenIdx >= tokens.length) tokenIdx = 0
-        if (tokens[tokenIdx].cellLen <= maxSegLen) return
-        tokenIdx++
-        guard++
-      }
+      return result
     }
 
+    // 将字符放入 rowChars，使用实际列索引；全角字符覆盖的额外 cell 设为占位 ""
+    const placeChar = (rowChars: string[], col: number, ch: string): number => {
+      const step = cellStep(ch)
+      rowChars[col] = ch
+      for (let s = 1; s < step && col + s < cols; s++) {
+        rowChars[col + s] = "" // 占位，join 时被吸收，保证全角视觉宽度正确
+      }
+      return step
+    }
+
+    let wordIdx = 0
+    // 回退用的扁平字符流（逐字符填充短段）
+    const flatSrc = [...source].map(convertChar)
+    let flatIdx = 0
+
     for (let r = 0; r < rows; r++) {
-      const segments = findSegments(darkGrid[r])
+      const rawSegs = findSegments(darkGrid[r])
+      const segments = mergeSegments(rawSegs)
       const rowChars: string[] = new Array(cols).fill(metrics.emptyChar)
 
       for (const seg of segments) {
         let segPtr = 0
+
+        // Pass 1: 尝试放入完整的词（词内字符连续，不跨段）
         while (segPtr < seg.length) {
-          advanceToValidToken()
-          if (tokenIdx >= tokens.length) tokenIdx = 0
-
-          const token = tokens[tokenIdx]
-          const remainingSeg = seg.length - segPtr
-
-          if (token.cellLen <= remainingSeg) {
-            // 令牌完整放入当前段
-            let ptr = segPtr
-            for (let i = 0; i < token.chars.length; i++) {
-              const ch = token.chars[i]
-              const step = cellStep(ch)
-              // 填入字符到段的起始位置
-              rowChars[seg[ptr]] = ch
-              // 全角字符占 2 cell，中间 cell 设为占位（空格保持空白）
-              for (let s = 1; s < step; s++) {
-                if (ptr + s < seg.length) {
-                  // 被 fullwidth 字符覆盖的 cell，标记为已用
-                  rowChars[seg[ptr + s]] = "" // 占位，join 时会被跳过
-                }
-              }
-              ptr += step
+          const remaining = seg.length - segPtr
+          // 在词列表中找第一个能放入剩余段的词
+          let bestOffset = -1
+          for (let offset = 0; offset < wordTokens.length; offset++) {
+            if (wordTokens[(wordIdx + offset) % wordTokens.length].cellLen <= remaining) {
+              bestOffset = offset
+              break
             }
-            segPtr = ptr
-            tokenIdx++
-          } else {
-            // 放不下——留空，等下一段
-            break
           }
+          if (bestOffset < 0) break // 没有词能放下，转 Pass 2
+
+          wordIdx += bestOffset
+          const word = wordTokens[wordIdx % wordTokens.length]
+          let ptr = segPtr
+          for (const ch of word.chars) {
+            ptr += placeChar(rowChars, seg[ptr], ch)
+          }
+          segPtr = ptr
+          wordIdx++
+        }
+
+        // Pass 2: 段内剩余位置用单个字符填充（保证撇捺等斜线连续不弯曲）
+        while (segPtr < seg.length) {
+          const ch = flatSrc[flatIdx % flatSrc.length]
+          const step = placeChar(rowChars, seg[segPtr], ch)
+          segPtr += step
+          flatIdx++
         }
       }
 
