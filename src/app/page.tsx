@@ -1,6 +1,7 @@
 "use client"
 
-import { useState, useEffect, useRef, useCallback, useMemo } from "react"
+import { useState, useEffect, useRef, useCallback, useMemo, useLayoutEffect } from "react"
+import { createPortal } from "react-dom"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import {
@@ -240,63 +241,100 @@ function FontPicker({
   const [open, setOpen] = useState(false)
   const [tab, setTab] = useState<"中文" | "西文" | "等宽" | "系统">("中文")
   const [query, setQuery] = useState("")
-  const ref = useRef<HTMLDivElement>(null)
+  const [coords, setCoords] = useState<{ top: number; left: number; width: number } | null>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
-
-  useEffect(() => {
-    if (!open) return
-    const handler = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) {
-        setOpen(false)
-      }
-    }
-    document.addEventListener("mousedown", handler)
-    return () => document.removeEventListener("mousedown", handler)
-  }, [open])
+  const popoverRef = useRef<HTMLDivElement>(null)
 
   const selected = fonts.find((f) => f.id === selectedId) ?? systemFonts.find((f) => f.id === selectedId)
 
-  // If monoOnly, hide non-mono groups from tabs (but still allow 系统)
   const tabs: ("中文" | "西文" | "等宽" | "系统")[] = monoOnly
     ? ["等宽", "系统"]
     : ["中文", "西文", "等宽", "系统"]
 
-  // Ensure tab is valid
   useEffect(() => {
     if (!tabs.includes(tab)) setTab(tabs[0])
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [monoOnly])
+
+  // Compute position from trigger rect whenever popover opens.
+  useLayoutEffect(() => {
+    if (!open || !triggerRef.current) return
+    const rect = triggerRef.current.getBoundingClientRect()
+    const POP_MAX_H = 360 // search(44) + tabs(40) + list(280) approx
+    const GAP = 6
+    let top = rect.bottom + GAP
+    // If not enough space below, open above
+    if (top + POP_MAX_H > window.innerHeight) {
+      top = Math.max(8, rect.top - POP_MAX_H - GAP)
+    }
+    let left = rect.left
+    const width = Math.max(rect.width, 340)
+    // Keep within viewport
+    if (left + width > window.innerWidth - 8) {
+      left = Math.max(8, window.innerWidth - width - 8)
+    }
+    setCoords({ top, left, width })
+  }, [open])
+
+  // Close on outside click (trigger + popover excluded) & on scroll/resize.
+  useEffect(() => {
+    if (!open) return
+    const handler = (e: MouseEvent) => {
+      const t = e.target as Node
+      if (triggerRef.current?.contains(t)) return
+      if (popoverRef.current?.contains(t)) return
+      setOpen(false)
+    }
+    const close = () => setOpen(false)
+    document.addEventListener("mousedown", handler)
+    window.addEventListener("scroll", close, true)
+    window.addEventListener("resize", close)
+    return () => {
+      document.removeEventListener("mousedown", handler)
+      window.removeEventListener("scroll", close, true)
+      window.removeEventListener("resize", close)
+    }
+  }, [open])
+
+  // ESC to close
+  useEffect(() => {
+    if (!open) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false)
+    }
+    document.addEventListener("keydown", onKey)
+    return () => document.removeEventListener("keydown", onKey)
+  }, [open])
 
   let list: FontDef[]
   if (tab === "系统") list = systemFonts
   else list = fonts.filter((f) => f.group === tab)
 
   const filtered = query.trim()
-    ? list.filter((f) => f.label.toLowerCase().includes(query.toLowerCase()) || f.id.toLowerCase().includes(query.toLowerCase()))
+    ? list.filter(
+        (f) =>
+          f.label.toLowerCase().includes(query.toLowerCase()) ||
+          f.id.toLowerCase().includes(query.toLowerCase()),
+      )
     : list
 
-  return (
-    <div className="relative" ref={ref}>
-      <button
-        ref={triggerRef}
-        onClick={() => setOpen((v) => !v)}
-        className="w-full flex items-center justify-between gap-2 px-3 py-2.5 rounded-lg border border-slate-200 bg-slate-50 hover:bg-white hover:border-slate-300 transition-colors cursor-pointer text-left"
-      >
-        <span className="flex items-center gap-2 min-w-0">
-          <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: accent }} />
-          <span className="text-sm font-semibold text-slate-800 truncate" style={{ fontFamily: selected?.stack }}>
-            {selected?.label ?? "选择字体"}
-          </span>
-        </span>
-        <ChevronDown className={`w-4 h-4 text-slate-400 shrink-0 transition-transform ${open ? "rotate-180" : ""}`} />
-      </button>
-
-      {open && (
+  const popover =
+    open && coords ? (
+      createPortal(
         <>
-          <div className="font-picker-overlay" />
           <div
+            className="font-picker-overlay"
+            onClick={() => setOpen(false)}
+          />
+          <div
+            ref={popoverRef}
             className="font-picker"
-            style={{ top: "100%", left: 0, marginTop: 6 }}
+            style={{
+              position: "fixed",
+              top: coords.top,
+              left: coords.left,
+              width: coords.width,
+            }}
           >
             {/* Search */}
             <div className="relative">
@@ -383,9 +421,28 @@ function FontPicker({
               </div>
             )}
           </div>
-        </>
-      )}
-    </div>
+        </>,
+        document.body,
+      )
+    ) : null
+
+  return (
+    <>
+      <button
+        ref={triggerRef}
+        onClick={() => setOpen((v) => !v)}
+        className="w-full flex items-center justify-between gap-2 px-3 py-2.5 rounded-lg border border-slate-200 bg-slate-50 hover:bg-white hover:border-slate-300 transition-colors cursor-pointer text-left"
+      >
+        <span className="flex items-center gap-2 min-w-0">
+          <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: accent }} />
+          <span className="text-sm font-semibold text-slate-800 truncate" style={{ fontFamily: selected?.stack }}>
+            {selected?.label ?? "选择字体"}
+          </span>
+        </span>
+        <ChevronDown className={`w-4 h-4 text-slate-400 shrink-0 transition-transform ${open ? "rotate-180" : ""}`} />
+      </button>
+      {popover}
+    </>
   )
 }
 

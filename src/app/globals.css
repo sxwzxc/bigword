@@ -395,21 +395,20 @@ body {
 .font-picker-overlay {
   position: fixed;
   inset: 0;
-  z-index: 40;
+  z-index: 9998;
+  /* transparent but captures clicks to close */
 }
 
 .font-picker {
-  position: absolute;
-  z-index: 50;
-  width: 340px;
-  max-width: calc(100vw - 32px);
+  z-index: 9999;
   background: #ffffff;
   border: 1px solid var(--border);
   border-radius: 14px;
-  box-shadow: 0 20px 50px -15px rgba(15, 23, 42, 0.25);
+  box-shadow: 0 20px 50px -15px rgba(15, 23, 42, 0.3), 0 8px 16px -8px rgba(15, 23, 42, 0.15);
   overflow: hidden;
   display: flex;
   flex-direction: column;
+  /* position: fixed + top/left/width set via inline style */
 }
 
 .font-picker-search {
