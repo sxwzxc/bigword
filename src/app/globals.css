@@ -576,9 +576,16 @@ body {
   white-space: pre;
   line-height: 1;
   letter-spacing: 0;
+  tab-size: 1;
   color: #e5e7eb;
   width: max-content;
   min-width: 100%;
+  /* Disable ligatures & kerning so every char cell has identical width —
+     this is what keeps the sampled glyph perfectly aligned. */
+  font-feature-settings: "liga" 0, "calt" 0, "kern" 0;
+  font-variant-ligatures: none;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: geometricPrecision;
 }
 
 .label-pill {
@@ -635,4 +642,52 @@ body {
   font-size: 12px;
   color: #d4d4d8;
   font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+}
+
+/* Segmented control buttons (font pickers) */
+.seg-btn {
+  padding: 7px 4px;
+  border-radius: 7px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #a1a1aa;
+  background: rgba(13, 17, 23, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  text-align: center;
+}
+
+.seg-btn:hover {
+  color: #e5e7eb;
+  border-color: rgba(var(--brand-primary-rgb), 0.25);
+}
+
+.seg-btn-active {
+  color: #fff;
+  background: rgba(var(--brand-primary-rgb), 0.18);
+  border-color: rgba(var(--brand-primary-rgb), 0.45);
+}
+
+/* Color swatch picker */
+.color-swatch {
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  border: 2px solid transparent;
+  cursor: pointer;
+  transition: transform 0.15s ease, border-color 0.15s ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.color-swatch:hover {
+  transform: scale(1.12);
+}
+
+.color-swatch-active {
+  border-color: rgba(255, 255, 255, 0.85);
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.4);
 }

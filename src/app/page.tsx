@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback, useMemo } from "react"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Card, CardContent } from "@/components/ui/card"
 import {
   Zap,
   Copy,
@@ -14,18 +14,81 @@ import {
   Type,
   Grid3x3,
   Hash,
+  Palette,
+  Check,
 } from "lucide-react"
 
 /* ============================================================
-   Core: render target text with characters from source text.
-   Uses an offscreen Canvas to rasterize the target, then samples
-   the pixels on a grid. Dark pixels (text) → next source char,
-   light pixels (background) → space.
+   Font presets
+   - TARGET fonts shape the big glyph (rendered on Canvas)
+   - SOURCE fonts are monospace families used to display the
+     small building-block characters (must be monospace so the
+     preview grid stays aligned with the sampling grid)
    ============================================================ */
 
-const CHAR_ASPECT = 2.1 // height/width of a monospace cell
+const TARGET_FONTS = [
+  { id: "sans", label: "无衬线", stack: 'Arial, "PingFang SC", "Microsoft YaHei", "Helvetica Neue", sans-serif' },
+  { id: "serif", label: "衬线", stack: 'Georgia, "Times New Roman", "Songti SC", "SimSun", serif' },
+  { id: "mono", label: "等宽", stack: 'ui-monospace, Menlo, Consolas, monospace' },
+  { id: "bold", label: "粗黑", stack: '"Arial Black", "Heiti SC", "Microsoft YaHei", sans-serif' },
+] as const
 
-function generateBigWord(source: string, target: string, density: number): string {
+const SOURCE_FONTS = [
+  { id: "mono", label: "System Mono", stack: 'ui-monospace, SFMono-Regular, Menlo, monospace' },
+  { id: "consolas", label: "Consolas", stack: 'Consolas, "Courier New", monospace' },
+  { id: "cascadia", label: "Cascadia", stack: '"Cascadia Code", "JetBrains Mono", "Fira Code", monospace' },
+] as const
+
+const TEXT_COLORS = [
+  { id: "white", value: "#e5e7eb" },
+  { id: "blue", value: "#5A9FD4" },
+  { id: "yellow", value: "#FFD43B" },
+  { id: "green", value: "#4ade80" },
+  { id: "pink", value: "#f472b6" },
+  { id: "orange", value: "#fb923c" },
+] as const
+
+/* ============================================================
+   Measure the real cell aspect ratio (cellH / cellW) of a
+   monospace font at line-height:1. The sampling grid MUST use
+   the same ratio so each sampled pixel maps exactly to one
+   character cell in the <pre> preview — this is what makes the
+   reconstructed glyph look perfectly aligned.
+   ============================================================ */
+
+function measureCharAspect(fontStack: string): number {
+  if (typeof window === "undefined") return 1.67
+  try {
+    const probe = document.createElement("span")
+    probe.style.cssText =
+      `font-family:${fontStack};font-size:100px;font-weight:700;` +
+      `position:absolute;visibility:hidden;white-space:pre;` +
+      `letter-spacing:0;line-height:1;`
+    probe.textContent = "M"
+    document.body.appendChild(probe)
+    const w = probe.getBoundingClientRect().width
+    document.body.removeChild(probe)
+    if (!w || !isFinite(w)) return 1.67
+    return 100 / w // cellH(=100) / cellW(=w)
+  } catch {
+    return 1.67
+  }
+}
+
+/* ============================================================
+   Core: rasterize target text with the chosen target font on an
+   offscreen Canvas, then sample pixels on a grid whose aspect
+   ratio matches the preview's monospace cells. Dark pixels get
+   the next source character; light pixels get a space.
+   ============================================================ */
+
+function generateBigWord(
+  source: string,
+  target: string,
+  density: number,
+  targetFontStack: string,
+  charAspect: number,
+): string {
   const src = [...source.replace(/\s+/g, "")]
   const tgt = target
   if (src.length === 0 || tgt.trim().length === 0) return ""
@@ -34,31 +97,32 @@ function generateBigWord(source: string, target: string, density: number): strin
   const ctx = canvas.getContext("2d")
   if (!ctx) return ""
 
-  const baseFont = 300
-  const fontStack = `900 ${baseFont}px Arial, "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif`
+  const baseFont = 320
+  const fontStack = `900 ${baseFont}px ${targetFontStack}`
   ctx.font = fontStack
 
   const lines = tgt.split("\n")
-  const lineH = baseFont * 1.25
-  const padding = Math.round(baseFont * 0.25)
+  const lineH = baseFont * 1.2
+  const padding = Math.round(baseFont * 0.2)
   let maxW = 0
   for (const l of lines) maxW = Math.max(maxW, ctx.measureText(l || " ").width)
 
-  canvas.width = Math.ceil(maxW + padding * 2)
-  canvas.height = Math.ceil(lineH * lines.length + padding * 2)
+  canvas.width = Math.max(1, Math.ceil(maxW + padding * 2))
+  canvas.height = Math.max(1, Math.ceil(lineH * lines.length + padding * 2))
 
   // canvas resize resets context state — re-apply
   ctx.fillStyle = "#ffffff"
   ctx.fillRect(0, 0, canvas.width, canvas.height)
   ctx.fillStyle = "#000000"
   ctx.font = fontStack
-  ctx.textBaseline = "top"
-  lines.forEach((l, i) => ctx.fillText(l, padding, padding + i * lineH))
+  ctx.textBaseline = "middle"
+  ctx.textAlign = "left"
+  lines.forEach((l, i) => ctx.fillText(l, padding, padding + (i + 0.5) * lineH))
 
   const img = ctx.getImageData(0, 0, canvas.width, canvas.height).data
   const cols = Math.max(8, Math.round(density))
   const cellW = canvas.width / cols
-  const cellH = cellW * CHAR_ASPECT
+  const cellH = cellW * charAspect // ← matches preview cell ratio → perfect alignment
   const rows = Math.ceil(canvas.height / cellH)
 
   const out: string[] = []
@@ -69,7 +133,7 @@ function generateBigWord(source: string, target: string, density: number): strin
       const x = Math.floor((c + 0.5) * cellW)
       const y = Math.floor((r + 0.5) * cellH)
       let bright = 255
-      if (x < canvas.width && y < canvas.height) {
+      if (x >= 0 && x < canvas.width && y >= 0 && y < canvas.height) {
         const p = (y * canvas.width + x) * 4
         bright = (img[p] + img[p + 1] + img[p + 2]) / 3
       }
@@ -80,7 +144,6 @@ function generateBigWord(source: string, target: string, density: number): strin
         rowChars.push(" ")
       }
     }
-    // trim trailing spaces per row to keep output compact
     out.push(rowChars.join("").replace(/\s+$/, ""))
   }
   return out.join("\n")
@@ -101,21 +164,24 @@ interface EdgeResult {
 }
 
 /* ============================================================
-   Presets
+   Presets — each carries a recommended target font
    ============================================================ */
 
-const PRESETS: { source: string; target: string; label: string }[] = [
-  { source: "Hello World!", target: "HI", label: "HI" },
-  { source: "EdgeOne Edge Function Python Cloud", target: "EDGE", label: "EDGE" },
-  { source: "用字符堆叠出大字的视觉效果拼字艺术", target: "大字", label: "大字" },
-  { source: "0123456789", target: "2026", label: "2026" },
+const PRESETS: { source: string; target: string; label: string; font: string }[] = [
+  { source: "Hello World!", target: "HI", label: "HI", font: "sans" },
+  { source: "EdgeOne Edge Function Python Cloud", target: "EDGE", label: "EDGE", font: "bold" },
+  { source: "用字符堆叠出大字的视觉效果拼字艺术", target: "大字", label: "大字", font: "sans" },
+  { source: "0123456789", target: "2026", label: "2026", font: "sans" },
 ]
 
 export default function Home() {
   const [source, setSource] = useState("Hello EdgeOne!")
   const [target, setTarget] = useState("HI")
-  const [density, setDensity] = useState(110)
-  const [fontSize, setFontSize] = useState(9)
+  const [density, setDensity] = useState(120)
+  const [fontSize, setFontSize] = useState(10)
+  const [targetFontId, setTargetFontId] = useState<string>("sans")
+  const [sourceFontId, setSourceFontId] = useState<string>("mono")
+  const [textColor, setTextColor] = useState<string>("#e5e7eb")
   const [art, setArt] = useState("")
   const [tab, setTab] = useState<"live" | "edge">("live")
   const [edgeResult, setEdgeResult] = useState<EdgeResult | null>(null)
@@ -123,13 +189,20 @@ export default function Home() {
   const [copied, setCopied] = useState(false)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
+  const targetFont = TARGET_FONTS.find((f) => f.id === targetFontId) ?? TARGET_FONTS[0]
+  const sourceFont = SOURCE_FONTS.find((f) => f.id === sourceFontId) ?? SOURCE_FONTS[0]
+
+  // Measure the real cell aspect ratio of the chosen source font.
+  // Recomputed only when the source font changes.
+  const charAspect = useMemo(() => measureCharAspect(sourceFont.stack), [sourceFont.stack])
+
   // Debounced real-time preview
   const recompute = useCallback(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current)
     debounceRef.current = setTimeout(() => {
-      setArt(generateBigWord(source, target, density))
+      setArt(generateBigWord(source, target, density, targetFont.stack, charAspect))
     }, 110)
-  }, [source, target, density])
+  }, [source, target, density, targetFont.stack, charAspect])
 
   useEffect(() => {
     recompute()
@@ -203,19 +276,29 @@ export default function Home() {
   }
 
   const handleShuffle = () => {
-    setSource((s) => [...s].sort(() => Math.random() - 0.5).join(""))
+    setSource((s) =>
+      [...s]
+        .map((c) => ({ c, k: Math.random() }))
+        .sort((a, b) => a.k - b.k)
+        .map((x) => x.c)
+        .join(""),
+    )
   }
 
   const handleReset = () => {
     setSource("Hello EdgeOne!")
     setTarget("HI")
-    setDensity(110)
-    setFontSize(9)
+    setDensity(120)
+    setFontSize(10)
+    setTargetFontId("sans")
+    setSourceFontId("mono")
+    setTextColor("#e5e7eb")
   }
 
-  const applyPreset = (p: { source: string; target: string }) => {
+  const applyPreset = (p: { source: string; target: string; font: string }) => {
     setSource(p.source)
     setTarget(p.target)
+    setTargetFontId(p.font)
   }
 
   const displayArt = tab === "edge" ? edgeResult?.art ?? "" : art
@@ -260,272 +343,338 @@ export default function Home() {
         </div>
       </header>
 
-      <main className="container mx-auto px-6 py-12 relative z-10">
-        <div className="max-w-6xl mx-auto space-y-8">
+      <main className="container mx-auto px-6 py-10 md:py-14 relative z-10">
+        <div className="max-w-7xl mx-auto">
           {/* Hero */}
-          <div className="text-center space-y-4 animate-fade-in-up">
+          <div className="text-center space-y-3 mb-10 animate-fade-in-up">
             <h1 className="text-4xl md:text-5xl font-bold leading-tight">
               <span className="bg-clip-text text-transparent bg-gradient-to-r from-[#3776AB] via-[#5A9FD4] to-[#FFD43B]">
                 用字符，拼出大字
               </span>
             </h1>
-            <p className="text-base text-gray-400 max-w-2xl mx-auto leading-relaxed">
+            <p className="text-sm md:text-base text-gray-400 max-w-2xl mx-auto leading-relaxed">
               输入<span className="text-[#3776AB]">素材文本</span>与
               <span className="text-[#FFD43B]">目标文本</span>，系统将素材字符重复排列，
               在视觉上还原目标文本的形态 —— 一种 ASCII Art 风格的拼字效果。
             </p>
           </div>
 
-          {/* Presets */}
-          <div className="flex flex-wrap gap-2 justify-center animate-fade-in-up animation-delay-100">
-            {PRESETS.map((p) => (
-              <button
-                key={p.label}
-                onClick={() => applyPreset(p)}
-                className="px-3 py-1.5 rounded-full text-xs font-mono border border-[#3776AB]/20 bg-[#3776AB]/5 text-gray-300 hover:border-[#3776AB]/50 hover:text-white transition-colors cursor-pointer"
-              >
-                {p.label}
-              </button>
-            ))}
-          </div>
+          {/* Workspace: left controls / right preview */}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+            {/* Left column — inputs + typography */}
+            <div className="lg:col-span-5 space-y-5 lg:sticky lg:top-6">
+              {/* Inputs */}
+              <Card className="glass-card border-0 animate-fade-in-up animation-delay-100">
+                <CardContent className="p-5 space-y-4">
+                  {/* Source */}
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="label-pill">
+                        <Sparkles className="w-3.5 h-3.5" />
+                        素材文本
+                      </span>
+                      <div className="flex items-center gap-2">
+                        <span className="stat-chip">
+                          <Hash className="w-3 h-3" />
+                          {[...source.replace(/\s+/g, "")].length}
+                        </span>
+                        <button
+                          onClick={handleShuffle}
+                          className="text-gray-400 hover:text-[#FFD43B] transition-colors p-1.5 rounded hover:bg-white/5 cursor-pointer"
+                          title="打乱素材顺序"
+                          aria-label="打乱素材顺序"
+                        >
+                          <Shuffle className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                    <textarea
+                      className="tool-textarea"
+                      rows={3}
+                      value={source}
+                      onChange={(e) => setSource(e.target.value)}
+                      placeholder="作为字符来源的文本，例如：Hello EdgeOne!"
+                    />
+                  </div>
 
-          {/* Input Grid */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 animate-fade-in-up animation-delay-200">
-            <Card className="glass-card border-0">
-              <CardHeader className="pb-3">
-                <CardTitle className="text-sm font-medium flex items-center gap-2 text-gray-300">
-                  <span className="label-pill">
-                    <Sparkles className="w-3.5 h-3.5" />
-                    素材文本
-                  </span>
-                  <span className="text-gray-500 text-xs font-normal">Source · 构成元素</span>
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-3">
-                <textarea
-                  className="tool-textarea"
-                  rows={4}
-                  value={source}
-                  onChange={(e) => setSource(e.target.value)}
-                  placeholder="作为字符来源的文本，例如：Hello EdgeOne!"
-                />
-                <div className="flex items-center justify-between">
-                  <span className="stat-chip">
-                    <Hash className="w-3 h-3" />
-                    {[...source.replace(/\s+/g, "")].length} 字符
-                  </span>
-                  <div className="flex gap-2">
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={handleShuffle}
-                      className="text-gray-400 hover:text-[#FFD43B] cursor-pointer"
+                  {/* Target */}
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="label-pill" style={{ color: "#5A9FD4" }}>
+                        <Type className="w-3.5 h-3.5" />
+                        目标文本
+                      </span>
+                      <span className="stat-chip">
+                        <Type className="w-3 h-3" />
+                        {target.length}
+                      </span>
+                    </div>
+                    <textarea
+                      className="tool-textarea"
+                      rows={2}
+                      value={target}
+                      onChange={(e) => setTarget(e.target.value)}
+                      placeholder="最终要呈现的内容，例如：HI"
+                    />
+                  </div>
+
+                  {/* Presets */}
+                  <div className="flex flex-wrap gap-2 pt-1">
+                    {PRESETS.map((p) => (
+                      <button
+                        key={p.label}
+                        onClick={() => applyPreset(p)}
+                        className="px-2.5 py-1 rounded-md text-xs font-mono border border-[#3776AB]/20 bg-[#3776AB]/5 text-gray-300 hover:border-[#3776AB]/50 hover:text-white transition-colors cursor-pointer"
+                      >
+                        {p.label}
+                      </button>
+                    ))}
+                    <button
+                      onClick={handleReset}
+                      className="ml-auto px-2.5 py-1 rounded-md text-xs text-gray-500 hover:text-[#3776AB] transition-colors cursor-pointer flex items-center gap-1"
                     >
-                      <Shuffle className="w-3.5 h-3.5 mr-1" />
-                      打乱
+                      <RotateCcw className="w-3 h-3" />
+                      重置
+                    </button>
+                  </div>
+                </CardContent>
+              </Card>
+
+              {/* Typography controls */}
+              <Card className="glass-card border-0 animate-fade-in-up animation-delay-200">
+                <CardContent className="p-5 space-y-5">
+                  <div className="flex items-center gap-2 text-xs font-semibold tracking-wider uppercase text-gray-500">
+                    <Palette className="w-3.5 h-3.5" />
+                    排版设置
+                  </div>
+
+                  {/* Target font */}
+                  <div className="space-y-2">
+                    <label className="text-xs text-gray-400 flex items-center justify-between">
+                      <span>目标字体 <span className="text-gray-600">· 决定大字形状</span></span>
+                    </label>
+                    <div className="grid grid-cols-4 gap-1.5">
+                      {TARGET_FONTS.map((f) => (
+                        <button
+                          key={f.id}
+                          onClick={() => setTargetFontId(f.id)}
+                          className={`seg-btn ${targetFontId === f.id ? "seg-btn-active" : ""}`}
+                        >
+                          {f.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Source font */}
+                  <div className="space-y-2">
+                    <label className="text-xs text-gray-400 flex items-center justify-between">
+                      <span>素材字体 <span className="text-gray-600">· 等宽，决定小字观感</span></span>
+                    </label>
+                    <div className="grid grid-cols-3 gap-1.5">
+                      {SOURCE_FONTS.map((f) => (
+                        <button
+                          key={f.id}
+                          onClick={() => setSourceFontId(f.id)}
+                          className={`seg-btn ${sourceFontId === f.id ? "seg-btn-active" : ""}`}
+                        >
+                          {f.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Density + font size */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <label className="text-xs text-gray-400 flex items-center gap-1.5">
+                          <Grid3x3 className="w-3.5 h-3.5 text-[#3776AB]" />
+                          输出密度
+                        </label>
+                        <span className="stat-chip">{density}</span>
+                      </div>
+                      <input
+                        type="range"
+                        min={40}
+                        max={240}
+                        step={2}
+                        value={density}
+                        onChange={(e) => setDensity(Number(e.target.value))}
+                        className="tool-slider"
+                      />
+                    </div>
+
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <label className="text-xs text-gray-400 flex items-center gap-1.5">
+                          <Type className="w-3.5 h-3.5 text-[#FFD43B]" />
+                          字号
+                        </label>
+                        <span className="stat-chip">{fontSize}px</span>
+                      </div>
+                      <input
+                        type="range"
+                        min={4}
+                        max={24}
+                        step={1}
+                        value={fontSize}
+                        onChange={(e) => setFontSize(Number(e.target.value))}
+                        className="tool-slider"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Text color */}
+                  <div className="space-y-2">
+                    <label className="text-xs text-gray-400">文字颜色</label>
+                    <div className="flex flex-wrap gap-2">
+                      {TEXT_COLORS.map((c) => (
+                        <button
+                          key={c.id}
+                          onClick={() => setTextColor(c.value)}
+                          className={`color-swatch ${textColor === c.value ? "color-swatch-active" : ""}`}
+                          style={{ backgroundColor: c.value }}
+                          aria-label={`颜色 ${c.id}`}
+                        >
+                          {textColor === c.value && <Check className="w-3 h-3 text-black/60" />}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            </div>
+
+            {/* Right column — preview */}
+            <div className="lg:col-span-7 animate-fade-in-up animation-delay-300">
+              <Card className="glass-card border-0">
+                <CardContent className="p-5">
+                  {/* Toolbar */}
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        className={`tab-btn ${tab === "live" ? "active" : ""}`}
+                        onClick={() => setTab("live")}
+                      >
+                        <Zap className="w-3.5 h-3.5 inline mr-1" />
+                        实时预览
+                      </button>
+                      <button
+                        className={`tab-btn ${tab === "edge" ? "active" : ""}`}
+                        onClick={() => edgeResult && setTab("edge")}
+                        style={!edgeResult ? { opacity: 0.5 } : undefined}
+                      >
+                        <Cloud className="w-3.5 h-3.5 inline mr-1" />
+                        边缘渲染
+                      </button>
+                    </div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="stat-chip">行 {displayStats.rows}</span>
+                      <span className="stat-chip">列 {displayStats.cols}</span>
+                      <span className="stat-chip">字符 {displayStats.chars}</span>
+                      <div className="w-px h-4 bg-white/10 mx-1 hidden sm:block" />
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={handleCopy}
+                        disabled={!displayArt}
+                        className="text-gray-400 hover:text-white cursor-pointer h-8"
+                      >
+                        {copied ? (
+                          <Check className="w-3.5 h-3.5 mr-1 text-[#4ade80]" />
+                        ) : (
+                          <Copy className="w-3.5 h-3.5 mr-1" />
+                        )}
+                        {copied ? "已复制" : "复制"}
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={handleDownload}
+                        disabled={!displayArt}
+                        className="text-gray-400 hover:text-white cursor-pointer h-8"
+                      >
+                        <Download className="w-3.5 h-3.5 mr-1" />
+                        下载
+                      </Button>
+                    </div>
+                  </div>
+
+                  {/* Edge banner */}
+                  {tab === "edge" && edgeResult && (
+                    <div className="edge-banner mb-3 flex flex-wrap items-center gap-x-4 gap-y-1">
+                      <span className="text-[#FFD43B]">⚡ {edgeResult.runtime}</span>
+                      <span>生成于 {new Date(edgeResult.generatedAt).toLocaleTimeString("zh-CN")}</span>
+                      {edgeResult.region && <span>节点 {edgeResult.region}</span>}
+                      <span className="text-gray-500">— 纯 Python 点阵字库，零依赖，边缘节点运行</span>
+                    </div>
+                  )}
+
+                  {/* Preview canvas */}
+                  <div className="preview-wrap" style={{ maxHeight: "62vh" }}>
+                    {displayArt ? (
+                      <pre
+                        className="preview-canvas"
+                        style={{
+                          fontSize: `${fontSize}px`,
+                          fontFamily: sourceFont.stack,
+                          color: textColor,
+                        }}
+                      >
+                        {displayArt}
+                      </pre>
+                    ) : (
+                      <div className="preview-empty">
+                        <Type className="w-10 h-10 mx-auto mb-3 text-gray-700" />
+                        <p>输入素材文本与目标文本，开始生成拼字效果</p>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Footer of preview */}
+                  <div className="mt-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                    <p className="text-xs text-gray-500 leading-relaxed">
+                      实时预览基于浏览器 Canvas 像素采样（高保真，支持中文）；
+                      边缘渲染通过 EdgeOne 边缘函数生成（纯 Python，可作 API 调用）。
+                    </p>
+                    <Button
+                      onClick={callEdge}
+                      disabled={edgeLoading}
+                      className="btn-primary rounded cursor-pointer shrink-0"
+                      size="sm"
+                    >
+                      {edgeLoading ? (
+                        <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin mr-2" />
+                      ) : (
+                        <Cloud className="w-4 h-4 mr-2" />
+                      )}
+                      调用边缘函数
                     </Button>
                   </div>
-                </div>
-              </CardContent>
-            </Card>
-
-            <Card className="glass-card border-0">
-              <CardHeader className="pb-3">
-                <CardTitle className="text-sm font-medium flex items-center gap-2 text-gray-300">
-                  <span className="label-pill" style={{ color: "#5A9FD4" }}>
-                    <Type className="w-3.5 h-3.5" />
-                    目标文本
-                  </span>
-                  <span className="text-gray-500 text-xs font-normal">Target · 还原内容</span>
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-3">
-                <textarea
-                  className="tool-textarea"
-                  rows={4}
-                  value={target}
-                  onChange={(e) => setTarget(e.target.value)}
-                  placeholder="最终要呈现的内容，例如：HI"
-                />
-                <div className="flex items-center justify-between">
-                  <span className="stat-chip">
-                    <Type className="w-3 h-3" />
-                    {target.length} 字符
-                  </span>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={handleReset}
-                    className="text-gray-400 hover:text-[#3776AB] cursor-pointer"
-                  >
-                    <RotateCcw className="w-3.5 h-3.5 mr-1" />
-                    重置
-                  </Button>
-                </div>
-              </CardContent>
-            </Card>
+                </CardContent>
+              </Card>
+            </div>
           </div>
 
-          {/* Controls */}
-          <Card className="glass-card border-0 animate-fade-in-up animation-delay-200">
-            <CardContent className="p-5">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between">
-                    <label className="text-sm text-gray-300 flex items-center gap-2">
-                      <Grid3x3 className="w-4 h-4 text-[#3776AB]" />
-                      输出密度
-                    </label>
-                    <span className="stat-chip">{density} 列</span>
-                  </div>
-                  <input
-                    type="range"
-                    min={40}
-                    max={220}
-                    step={2}
-                    value={density}
-                    onChange={(e) => setDensity(Number(e.target.value))}
-                    className="tool-slider"
-                  />
-                  <p className="text-xs text-gray-500">列数越多，拼字越精细，输出越大</p>
-                </div>
-
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between">
-                    <label className="text-sm text-gray-300 flex items-center gap-2">
-                      <Type className="w-4 h-4 text-[#FFD43B]" />
-                      字体大小
-                    </label>
-                    <span className="stat-chip">{fontSize}px</span>
-                  </div>
-                  <input
-                    type="range"
-                    min={4}
-                    max={22}
-                    step={1}
-                    value={fontSize}
-                    onChange={(e) => setFontSize(Number(e.target.value))}
-                    className="tool-slider"
-                  />
-                  <p className="text-xs text-gray-500">预览区每个小字符的显示字号</p>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* Preview */}
-          <Card className="glass-card border-0 animate-fade-in-up animation-delay-300">
-            <CardHeader className="pb-3">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <div className="flex items-center gap-2">
-                  <button
-                    className={`tab-btn ${tab === "live" ? "active" : ""}`}
-                    onClick={() => setTab("live")}
-                  >
-                    <Zap className="w-3.5 h-3.5 inline mr-1" />
-                    实时预览
-                  </button>
-                  <button
-                    className={`tab-btn ${tab === "edge" ? "active" : ""}`}
-                    onClick={() => edgeResult && setTab("edge")}
-                    style={!edgeResult ? { opacity: 0.5 } : undefined}
-                  >
-                    <Cloud className="w-3.5 h-3.5 inline mr-1" />
-                    边缘渲染
-                  </button>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="stat-chip hidden sm:inline-flex">行 {displayStats.rows}</span>
-                  <span className="stat-chip hidden sm:inline-flex">列 {displayStats.cols}</span>
-                  <span className="stat-chip">字符 {displayStats.chars}</span>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={handleCopy}
-                    disabled={!displayArt}
-                    className="text-gray-400 hover:text-white cursor-pointer"
-                  >
-                    <Copy className="w-3.5 h-3.5 mr-1" />
-                    {copied ? "已复制" : "复制"}
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={handleDownload}
-                    disabled={!displayArt}
-                    className="text-gray-400 hover:text-white cursor-pointer"
-                  >
-                    <Download className="w-3.5 h-3.5 mr-1" />
-                    下载
-                  </Button>
-                </div>
-              </div>
-            </CardHeader>
-            <CardContent>
-              {tab === "edge" && edgeResult && (
-                <div className="edge-banner mb-3 flex flex-wrap items-center gap-x-4 gap-y-1">
-                  <span className="text-[#FFD43B]">⚡ {edgeResult.runtime}</span>
-                  <span>生成于 {new Date(edgeResult.generatedAt).toLocaleTimeString("zh-CN")}</span>
-                  {edgeResult.region && <span>节点 {edgeResult.region}</span>}
-                  <span className="text-gray-500">— 纯 Python 点阵字库，零依赖，边缘节点运行</span>
-                </div>
-              )}
-
-              <div className="preview-wrap" style={{ maxHeight: "60vh" }}>
-                {displayArt ? (
-                  <pre
-                    className="preview-canvas"
-                    style={{ fontSize: `${fontSize}px` }}
-                  >
-                    {displayArt}
-                  </pre>
-                ) : (
-                  <div className="preview-empty">
-                    请输入素材文本与目标文本以生成拼字效果
-                  </div>
-                )}
-              </div>
-
-              <div className="mt-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-                <p className="text-xs text-gray-500 leading-relaxed">
-                  实时预览基于浏览器 Canvas 渲染（高保真，支持中文）；
-                  边缘渲染通过 EdgeOne 边缘函数生成（纯 Python，可作 API 调用）。
-                </p>
-                <Button
-                  onClick={callEdge}
-                  disabled={edgeLoading}
-                  className="btn-primary rounded cursor-pointer shrink-0"
-                  size="sm"
-                >
-                  {edgeLoading ? (
-                    <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin mr-2" />
-                  ) : (
-                    <Cloud className="w-4 h-4 mr-2" />
-                  )}
-                  调用边缘函数渲染
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
-
           {/* Features */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-5 mt-4">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-5 mt-10">
             <div className="feature-card p-5 animate-fade-in-up animation-delay-100">
               <div className="w-10 h-10 mb-4 rounded-lg bg-[#3776AB]/15 flex items-center justify-center">
                 <Zap className="w-5 h-5 text-[#3776AB]" />
               </div>
-              <h3 className="font-semibold mb-2">实时预览</h3>
+              <h3 className="font-semibold mb-2">像素级对齐</h3>
               <p className="text-gray-400 text-sm leading-relaxed">
-                Canvas 像素采样，输入即变，支持中英文与多行目标文本
+                动态测量素材字体的真实字符宽高比，采样网格与显示网格严格一致，拼字无错位
               </p>
             </div>
             <div className="feature-card p-5 animate-fade-in-up animation-delay-200">
               <div className="w-10 h-10 mb-4 rounded-lg bg-[#3776AB]/15 flex items-center justify-center">
-                <Grid3x3 className="w-5 h-5 text-[#FFD43B]" />
+                <Palette className="w-5 h-5 text-[#FFD43B]" />
               </div>
-              <h3 className="font-semibold mb-2">密度可调</h3>
+              <h3 className="font-semibold mb-2">双字体可控</h3>
               <p className="text-gray-400 text-sm leading-relaxed">
-                自定义输出列数与字号，从粗犷到精细自由切换
+                目标字体决定大字形态，素材字体决定小字观感，密度字号颜色自由调节
               </p>
             </div>
             <div className="feature-card p-5 animate-fade-in-up animation-delay-300">
@@ -534,7 +683,7 @@ export default function Home() {
               </div>
               <h3 className="font-semibold mb-2">边缘算力</h3>
               <p className="text-gray-400 text-sm leading-relaxed">
-                EdgeOne 边缘函数纯 Python 生成，就近节点，零依赖部署
+                EdgeOne 边缘函数纯 Python 生成，就近节点，零依赖部署，可作 API 调用
               </p>
             </div>
           </div>
@@ -543,7 +692,7 @@ export default function Home() {
 
       <footer className="footer-border relative z-10 mt-12">
         <div className="container mx-auto px-6 py-8">
-          <div className="flex items-center justify-center gap-2 text-gray-500">
+          <div className="flex items-center justify-center gap-2 text-gray-500 text-sm">
             <span>Powered by</span>
             <a
               href="https://pages.edgeone.ai"
@@ -551,7 +700,7 @@ export default function Home() {
               rel="noopener noreferrer"
               className="text-gray-400 hover:text-[#3776AB] transition-colors flex items-center gap-1"
             >
-              <img src="/eo-logo-blue.svg" alt="EdgeOne" width={16} height={16} />
+              <Cloud className="w-4 h-4" />
               EdgeOne Pages
             </a>
           </div>
