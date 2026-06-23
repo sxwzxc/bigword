@@ -129,17 +129,37 @@ function containsCJK(text: string): boolean {
 }
 
 /* ============================================================
+   Cell width classification — CJK glyphs are full-width (1 cell),
+   ASCII letters/digits are half-width (0.5 cell). Spaces are 0.5 cell.
+   This allows accurate layout in both normal and anti-truncation modes.
+   ============================================================ */
+
+function isCJKChar(ch: string): boolean {
+  const code = ch.codePointAt(0)
+  if (code === undefined) return false
+  return isCJKCodePoint(code)
+}
+
+// Returns width in "cell units": CJK = 1.0, ASCII/space = 0.5
+// (reserved for future use; current implementation handles spacing via toFullwidth)
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function charWidth(ch: string): number {
+  if (ch === " " || ch === "\u3000") return 0.5
+  if (isCJKChar(ch)) return 1.0
+  return 0.5 // ASCII letters, digits, punctuation
+}
+
+/* ============================================================
    Fullwidth conversion — when source contains CJK, convert all
-   half-width ASCII (letters, digits, punctuation, space) to their
-   fullwidth equivalents so every character has identical width.
-   This is what makes mixed CJK+English+numbers align perfectly.
+   half-width ASCII (letters, digits, punctuation) to their fullwidth
+   equivalents. Space stays as a half-width separator.
    ============================================================ */
 
 function toFullwidth(ch: string): string {
   const code = ch.codePointAt(0)
   if (code === undefined) return ch
-  // Space → ideographic space (U+3000)
-  if (code === 0x20) return "\u3000"
+  // Space stays as regular space (half-width) — NOT converted to U+3000
+  if (code === 0x20) return " "
   // ASCII printable (0x21..0x7E) → fullwidth (U+FF01..U+FF5E)
   if (code >= 0x21 && code <= 0x7e) {
     return String.fromCodePoint(code + 0xfee0)
@@ -155,8 +175,8 @@ function toFullwidth(ch: string): string {
    ============================================================ */
 
 interface CellMetrics {
-  charAspect: number  // cellH / cellW
-  emptyChar: string   // " " for ASCII, "\u3000" for CJK
+  charAspect: number  // cellH / cellW  (full-width cell)
+  emptyChar: string   // " " always — spaces are half-width, rendered via CSS
 }
 
 function measureCellMetrics(fontStack: string, hasCJK: boolean): CellMetrics {
@@ -171,15 +191,12 @@ function measureCellMetrics(fontStack: string, hasCJK: boolean): CellMetrics {
     document.body.appendChild(probe)
 
     if (hasCJK) {
-      // Measure a CJK character — it's full-width (square-ish).
-      // All source chars will be converted to fullwidth, so they share this width.
       probe.textContent = "\u5b57"
       const cjkW = probe.getBoundingClientRect().width
       document.body.removeChild(probe)
-      if (!cjkW || !isFinite(cjkW)) return { charAspect: 1.0, emptyChar: "\u3000" }
-      return { charAspect: 100 / cjkW, emptyChar: "\u3000" }
+      if (!cjkW || !isFinite(cjkW)) return { charAspect: 1.0, emptyChar: " " }
+      return { charAspect: 100 / cjkW, emptyChar: " " }
     } else {
-      // Pure ASCII — measure 'M' in the source font
       probe.textContent = "M"
       const asciiW = probe.getBoundingClientRect().width
       document.body.removeChild(probe)
@@ -259,8 +276,9 @@ function generateBigWord(
   }
 
   // 准备素材字符：CJK 模式下转换为全角，保证每个字符等宽
+  // 空格保持半角（普通空格 " "），视觉上占半个中文字符宽度
   const convertChar = (ch: string): string => hasCJK ? toFullwidth(ch) : ch
-  const spaceChar = hasCJK ? "\u3000" : " "
+  const spaceChar = " " // 词间分隔符：半角空格，占 0.5 个全角单元
 
   const out: string[] = []
 
@@ -274,6 +292,7 @@ function generateBigWord(
     const wordChars: string[][] = words.map((w) => [...w].map(convertChar))
 
     // 令牌流：word1, space, word2, space, ..., wordN, space（循环时 boundary 也有 space）
+    // 空格令牌占 1 个采样单元（但在视觉上是半角，通过后续渲染处理）
     interface Token { chars: string[]; isSpace: boolean }
     const tokens: Token[] = []
     for (let i = 0; i < wordChars.length; i++) {
@@ -750,10 +769,11 @@ export default function Home() {
     if (maxCols === 0) return
 
     // Render to an offscreen canvas
-    const lineH = fontSize * 1.0
-    // charAspect = cellH/cellW, so charW = fontSize / charAspect
-    const charW = cellMetrics.charAspect ? fontSize / cellMetrics.charAspect : fontSize * 0.6
-    const padding = 24
+    // 高清导出：渲染分辨率为显示尺寸的 4 倍
+    const SCALE = 4
+    const lineH = fontSize * SCALE
+    const charW = (cellMetrics.charAspect ? fontSize / cellMetrics.charAspect : fontSize * 0.6) * SCALE
+    const padding = 24 * SCALE
     const canvas = document.createElement("canvas")
     canvas.width = Math.ceil(maxCols * charW + padding * 2)
     canvas.height = Math.ceil(lines.length * lineH + padding * 2)
@@ -766,7 +786,7 @@ export default function Home() {
 
     // Text
     ctx.fillStyle = textColor
-    ctx.font = `700 ${fontSize}px ${sourceFont.stack}`
+    ctx.font = `700 ${fontSize * SCALE}px ${sourceFont.stack}`
     ctx.textBaseline = "top"
     ctx.textAlign = "left"
     lines.forEach((line, i) => {
