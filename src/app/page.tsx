@@ -704,7 +704,7 @@ export default function Home() {
 
       {/* Header */}
       <header className="header-border sticky top-0 z-30">
-        <div className="max-w-7xl mx-auto px-6 py-2 flex items-center justify-between">
+        <div className="max-w-7xl mx-auto px-2 sm:px-6 py-2 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-indigo-500 to-violet-500 flex items-center justify-center shadow-md shadow-indigo-500/30">
               <Type className="w-4 h-4 text-white" />
@@ -733,7 +733,7 @@ export default function Home() {
         </div>
       </header>
 
-      <main className="max-w-7xl mx-auto px-6 py-8 md:py-12">
+      <main className="max-w-7xl mx-auto px-2 sm:px-6 py-6 md:py-12">
         {/* Hero */}
         <div className="text-center mb-6 animate-fade-in-up">
           <h1 className="text-4xl md:text-6xl font-black leading-tight">
@@ -821,29 +821,12 @@ export default function Home() {
               </div>
             </div>
 
-            {/* Row 2: Font pickers + Sliders */}
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-              {/* Target font */}
+            {/* Row 2: Font pickers — 素材字体(左) | 目标字体(右), 始终同一行 */}
+            <div className="grid grid-cols-2 gap-3 sm:gap-4">
+              {/* Source font (left) */}
               <div className="space-y-1.5">
                 <label className="text-xs text-slate-500 font-medium">
-                  目标字体 <span className="text-slate-400">· 大字形态</span>
-                </label>
-                <FontPicker
-                  accent="#6366f1"
-                  fonts={allFonts}
-                  selectedId={targetFontId}
-                  onSelect={setTargetFontId}
-                  systemFonts={systemFonts}
-                  onScan={scanSystemFonts}
-                  scanning={scanning}
-                  scanError={scanError}
-                />
-              </div>
-
-              {/* Source font */}
-              <div className="space-y-1.5">
-                <label className="text-xs text-slate-500 font-medium">
-                  素材字体 <span className="text-slate-400">· 小字观感</span>
+                  素材字体 <span className="text-slate-400">· 小字</span>
                 </label>
                 <FontPicker
                   accent="#10b981"
@@ -857,6 +840,26 @@ export default function Home() {
                 />
               </div>
 
+              {/* Target font (right) */}
+              <div className="space-y-1.5">
+                <label className="text-xs text-slate-500 font-medium">
+                  目标字体 <span className="text-slate-400">· 大字</span>
+                </label>
+                <FontPicker
+                  accent="#6366f1"
+                  fonts={allFonts}
+                  selectedId={targetFontId}
+                  onSelect={setTargetFontId}
+                  systemFonts={systemFonts}
+                  onScan={scanSystemFonts}
+                  scanning={scanning}
+                  scanError={scanError}
+                />
+              </div>
+            </div>
+
+            {/* Row 2b: Sliders — 密度 | 小字字号 | 目标字号 */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4">
               {/* Density */}
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between">
@@ -896,15 +899,13 @@ export default function Home() {
                   className="tool-slider mt-2.5"
                 />
               </div>
-            </div>
 
-            {/* Row 2b: Target font size (full width row) */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+              {/* Target font size */}
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between">
                   <label className="text-xs text-slate-500 font-medium flex items-center gap-1.5">
                     <Type className="w-3.5 h-3.5 text-indigo-500" />
-                    目标字号 <span className="text-slate-400">· 大字渲染尺寸</span>
+                    目标字号
                   </label>
                   <span className="stat-chip">{targetFontSize}px</span>
                 </div>
@@ -1107,7 +1108,7 @@ export default function Home() {
       </main>
 
       <footer className="footer-border mt-12">
-        <div className="max-w-7xl mx-auto px-6 py-8 flex items-center justify-center gap-2 text-slate-400 text-sm">
+        <div className="max-w-7xl mx-auto px-2 sm:px-6 py-8 flex items-center justify-center gap-2 text-slate-400 text-sm">
           <span>Powered by</span>
           <a
             href="https://pages.edgeone.ai" target="_blank" rel="noopener noreferrer"
