@@ -1,3 +1,16 @@
+# BigWord · 文本拼字艺术 on EdgeOne Pages
+
+A real-time ASCII-Art word builder deployed on Tencent EdgeOne Pages. Users input a **source text** (character pool) and a **target text** (content to reconstruct); the app repeats source characters to visually rebuild the target text's shape — like stacking tiny characters into big letters.
+
+- **Live preview** via in-browser Canvas pixel sampling (high-fidelity, CJK-supported)
+- **Edge rendering** via a pure-Python EdgeOne edge function (`POST /bigword`) with an embedded 5×7 bitmap font — zero dependencies, runs close to the user
+- Adjustable **density** (output columns) and **font size**
+- Built on the Python Handler Mode template: Next.js 15 + React 19 + Tailwind CSS 4, with file-based Python cloud functions in `cloud-functions/`.
+
+> The original Python Handler Mode template docs are kept below for reference.
+
+---
+
 # Python Cloud Functions on EdgeOne Pages - Handler Mode
 
 A function request demonstration website based on Next.js + Tailwind CSS, showcasing how to deploy Python Cloud Functions using Handler Mode on EdgeOne Pages with file-based routing.
