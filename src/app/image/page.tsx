@@ -9,7 +9,6 @@ import {
   Download,
   RotateCcw,
   Type,
-  Palette,
   Check,
   Search,
   ScanLine,
@@ -25,6 +24,8 @@ import {
   Sparkles,
   Shuffle,
   Hash,
+  Move,
+  Grid3x3,
 } from "lucide-react"
 import Link from "next/link"
 
@@ -100,6 +101,14 @@ const BG_COLORS = [
 
 type Tool = "select" | "pan" | "pencil" | "eraser" | "eyedropper"
 
+interface CharBitmap {
+  char: string
+  width: number
+  height: number
+  data: boolean[][]
+  advanceWidth: number
+}
+
 function isCJKCodePoint(code: number): boolean {
   return (
     (code >= 0x1100 && code <= 0x115f) ||
@@ -122,14 +131,215 @@ function containsCJK(text: string): boolean {
   return false
 }
 
-function toFullwidth(ch: string): string {
-  const code = ch.codePointAt(0)
-  if (code === undefined) return ch
-  if (code === 0x20) return "\u3000"
-  if (code >= 0x21 && code <= 0x7e) {
-    return String.fromCodePoint(code + 0xfee0)
+function rasterizeCharToBitmap(
+  char: string,
+  fontStack: string,
+  fontSize: number,
+  threshold: number = 128
+): CharBitmap | null {
+  if (!char || char.trim() === "") return null
+
+  const canvas = document.createElement("canvas")
+  const ctx = canvas.getContext("2d")
+  if (!ctx) return null
+
+  const padding = Math.ceil(fontSize * 0.2)
+  const probeSize = fontSize * 2
+
+  canvas.width = probeSize
+  canvas.height = probeSize
+
+  ctx.fillStyle = "#000000"
+  ctx.fillRect(0, 0, probeSize, probeSize)
+
+  ctx.fillStyle = "#ffffff"
+  ctx.font = `700 ${fontSize}px ${fontStack}`
+  ctx.textBaseline = "middle"
+  ctx.textAlign = "center"
+  ctx.fillText(char, probeSize / 2, probeSize / 2)
+
+  const imageData = ctx.getImageData(0, 0, probeSize, probeSize)
+  const pixels = imageData.data
+
+  let minX = probeSize, minY = probeSize, maxX = 0, maxY = 0
+  for (let y = 0; y < probeSize; y++) {
+    for (let x = 0; x < probeSize; x++) {
+      const idx = (y * probeSize + x) * 4
+      const brightness = (pixels[idx] + pixels[idx + 1] + pixels[idx + 2]) / 3
+      if (brightness > threshold) {
+        minX = Math.min(minX, x)
+        minY = Math.min(minY, y)
+        maxX = Math.max(maxX, x)
+        maxY = Math.max(maxY, y)
+      }
+    }
   }
-  return ch
+
+  if (minX > maxX || minY > maxY) {
+    return { char, width: 0, height: 0, data: [], advanceWidth: 0 }
+  }
+
+  const charWidth = maxX - minX + 1 + padding * 2
+  const charHeight = maxY - minY + 1 + padding * 2
+
+  const data: boolean[][] = []
+  for (let y = 0; y < charHeight; y++) {
+    const row: boolean[] = []
+    for (let x = 0; x < charWidth; x++) {
+      const srcX = minX - padding + x
+      const srcY = minY - padding + y
+      if (srcX >= 0 && srcX < probeSize && srcY >= 0 && srcY < probeSize) {
+        const idx = (srcY * probeSize + srcX) * 4
+        const brightness = (pixels[idx] + pixels[idx + 1] + pixels[idx + 2]) / 3
+        row.push(brightness > threshold)
+      } else {
+        row.push(false)
+      }
+    }
+    data.push(row)
+  }
+
+  const advanceWidth = charWidth + Math.ceil(fontSize * 0.05)
+
+  return { char, width: charWidth, height: charHeight, data, advanceWidth }
+}
+
+function rasterizeTargetToGrid(
+  target: string,
+  fontStack: string,
+  fontSize: number,
+  threshold: number = 128
+): { grid: boolean[][]; width: number; height: number } | null {
+  if (!target || target.trim() === "") return null
+
+  const canvas = document.createElement("canvas")
+  const ctx = canvas.getContext("2d")
+  if (!ctx) return null
+
+  const lines = target.split("\n")
+  const lineH = fontSize * 1.35
+  const padding = Math.ceil(fontSize * 0.5)
+
+  ctx.font = `900 ${fontSize}px ${fontStack}`
+  
+  let maxWidth = 0
+  for (const line of lines) {
+    const m = ctx.measureText(line || " ")
+    maxWidth = Math.max(maxWidth, m.width)
+  }
+
+  const canvasWidth = Math.ceil(maxWidth + padding * 2)
+  const canvasHeight = Math.ceil(lines.length * lineH + padding * 2)
+
+  canvas.width = canvasWidth
+  canvas.height = canvasHeight
+
+  ctx.fillStyle = "#000000"
+  ctx.fillRect(0, 0, canvasWidth, canvasHeight)
+
+  ctx.fillStyle = "#ffffff"
+  ctx.font = `900 ${fontSize}px ${fontStack}`
+  ctx.textBaseline = "top"
+  ctx.textAlign = "left"
+
+  for (let i = 0; i < lines.length; i++) {
+    ctx.fillText(lines[i], padding, padding + i * lineH)
+  }
+
+  const imageData = ctx.getImageData(0, 0, canvasWidth, canvasHeight)
+  const pixels = imageData.data
+
+  const grid: boolean[][] = []
+  for (let y = 0; y < canvasHeight; y++) {
+    const row: boolean[] = []
+    for (let x = 0; x < canvasWidth; x++) {
+      const idx = (y * canvasWidth + x) * 4
+      const brightness = (pixels[idx] + pixels[idx + 1] + pixels[idx + 2]) / 3
+      row.push(brightness > threshold)
+    }
+    grid.push(row)
+  }
+
+  return { grid, width: canvasWidth, height: canvasHeight }
+}
+
+function renderPixelArt(
+  targetGrid: { grid: boolean[][]; width: number; height: number },
+  charBitmaps: CharBitmap[],
+  options: {
+    cellSize: number
+    offsetX: number
+    offsetY: number
+    textColor: string
+    bgColor: string
+    scale: number
+  }
+): HTMLCanvasElement | null {
+  if (!targetGrid || charBitmaps.length === 0) return null
+
+  const { grid, width: gridW, height: gridH } = targetGrid
+  const { cellSize, offsetX, offsetY, textColor, bgColor, scale } = options
+
+  const outputWidth = Math.ceil(gridW * cellSize * scale)
+  const outputHeight = Math.ceil(gridH * cellSize * scale)
+
+  const canvas = document.createElement("canvas")
+  canvas.width = outputWidth
+  canvas.height = outputHeight
+  const ctx = canvas.getContext("2d")
+  if (!ctx) return null
+
+  if (bgColor !== "transparent") {
+    ctx.fillStyle = bgColor
+    ctx.fillRect(0, 0, outputWidth, outputHeight)
+  } else {
+    ctx.clearRect(0, 0, outputWidth, outputHeight)
+  }
+
+  ctx.fillStyle = textColor
+
+  let charIdx = 0
+
+  const cellPixelSize = cellSize * scale
+
+  for (let gridY = 0; gridY < gridH; gridY++) {
+    for (let gridX = 0; gridX < gridW; gridX++) {
+      if (!grid[gridY][gridX]) continue
+
+      if (charIdx >= charBitmaps.length) {
+        charIdx = 0
+      }
+
+      const bitmap = charBitmaps[charIdx]
+      if (!bitmap || bitmap.width === 0 || bitmap.height === 0) {
+        charIdx++
+        continue
+      }
+
+      const baseX = gridX * cellPixelSize + offsetX * scale
+      const baseY = gridY * cellPixelSize + offsetY * scale
+
+      for (let cy = 0; cy < bitmap.height; cy++) {
+        for (let cx = 0; cx < bitmap.width; cx++) {
+          if (!bitmap.data[cy][cx]) continue
+
+          const pixelX = baseX + (cx / bitmap.width) * cellPixelSize
+          const pixelY = baseY + (cy / bitmap.height) * cellPixelSize
+
+          ctx.fillRect(
+            Math.floor(pixelX),
+            Math.floor(pixelY),
+            Math.ceil(scale),
+            Math.ceil(scale)
+          )
+        }
+      }
+
+      charIdx++
+    }
+  }
+
+  return canvas
 }
 
 interface FontPickerProps {
@@ -347,13 +557,18 @@ function FontPicker({
 export default function ImagePage() {
   const [source, setSource] = useState("鳖鳖")
   const [target, setTarget] = useState("赖疙宝")
-  const [fontSize, setFontSize] = useState(10)
+  const [cellSize, setCellSize] = useState(12)
   const [targetFontSize, setTargetFontSize] = useState(320)
   const [targetFontId, setTargetFontId] = useState("yahei")
   const [sourceFontId, setSourceFontId] = useState("yahei")
   const [textColor, setTextColor] = useState("#818cf8")
   const [bgColor, setBgColor] = useState("#0f172a")
-  const [preventTruncation, setPreventTruncation] = useState(false)
+  const [charSpacing, setCharSpacing] = useState(0)
+  const [lineSpacing, setLineSpacing] = useState(0)
+  const [offsetX, setOffsetX] = useState(0)
+  const [offsetY, setOffsetY] = useState(0)
+  const [scale, setScale] = useState(1)
+  const [threshold, setThreshold] = useState(128)
 
   const [zoom, setZoom] = useState(1)
   const [panOffset, setPanOffset] = useState({ x: 0, y: 0 })
@@ -409,215 +624,44 @@ export default function ImagePage() {
     }
   }, [])
 
-  const renderBigWordToCanvas = useCallback(() => {
+  const renderPixelArtToCanvas = useCallback(() => {
     if (!source || !target.trim()) return null
 
-    const offscreen = document.createElement("canvas")
-    const ctx = offscreen.getContext("2d")
-    if (!ctx) return null
+    const targetGrid = rasterizeTargetToGrid(target, targetFont.stack, targetFontSize, threshold)
+    if (!targetGrid) return null
 
-    const baseFont = Math.max(40, targetFontSize)
-    const fontStack = `900 ${baseFont}px ${targetFont.stack}`
-    ctx.font = fontStack
+    const sourceChars = [...source]
+    const charBitmaps: CharBitmap[] = []
+    const bitmapCache = new Map<string, CharBitmap | null>()
 
-    const lines = target.split("\n")
-    const lineH = baseFont * 1.35
-    const padding = Math.round(baseFont * 0.35)
-
-    let maxW = 0
-    let maxAscent = 0
-    let maxDescent = 0
-    for (const l of lines) {
-      const m = ctx.measureText(l || " ")
-      maxW = Math.max(maxW, m.width)
-      if (m.actualBoundingBoxAscent) maxAscent = Math.max(maxAscent, m.actualBoundingBoxAscent)
-      if (m.actualBoundingBoxDescent) maxDescent = Math.max(maxDescent, m.actualBoundingBoxDescent)
-    }
-    if (maxAscent === 0) maxAscent = baseFont * 0.85
-    if (maxDescent === 0) maxDescent = baseFont * 0.25
-
-    offscreen.width = Math.max(1, Math.ceil(maxW + padding * 2))
-    offscreen.height = Math.max(1, Math.ceil(maxAscent + maxDescent + (lines.length - 1) * lineH + padding * 2))
-
-    ctx.fillStyle = "#ffffff"
-    ctx.fillRect(0, 0, offscreen.width, offscreen.height)
-    ctx.fillStyle = "#000000"
-    ctx.font = fontStack
-    ctx.textBaseline = "alphabetic"
-    ctx.textAlign = "left"
-    lines.forEach((l, i) => ctx.fillText(l, padding, padding + maxAscent + i * lineH))
-
-    const img = ctx.getImageData(0, 0, offscreen.width, offscreen.height).data
-
-    const cols = Math.max(8, Math.round(baseFont * 0.375))
-    const cellW = offscreen.width / cols
-
-    const measureProbe = document.createElement("span")
-    measureProbe.style.cssText =
-      `font-family:${sourceFont.stack};font-size:100px;font-weight:700;` +
-      `position:absolute;visibility:hidden;white-space:pre;letter-spacing:0;line-height:1;`
-    document.body.appendChild(measureProbe)
-
-    let charAspect: number
-    let emptyChar: string
-    if (hasCJK) {
-      measureProbe.textContent = "\u5b57"
-      const cjkW = measureProbe.getBoundingClientRect().width
-      document.body.removeChild(measureProbe)
-      if (!cjkW || !isFinite(cjkW)) {
-        charAspect = 1.0
-        emptyChar = "\u3000"
-      } else {
-        charAspect = 100 / cjkW
-        emptyChar = "\u3000"
+    for (const ch of sourceChars) {
+      if (bitmapCache.has(ch)) {
+        const cached = bitmapCache.get(ch)
+        if (cached) charBitmaps.push(cached)
+        continue
       }
-    } else {
-      measureProbe.textContent = "M"
-      const asciiW = measureProbe.getBoundingClientRect().width
-      document.body.removeChild(measureProbe)
-      if (!asciiW || !isFinite(asciiW)) {
-        charAspect = 1.0
-        emptyChar = " "
-      } else {
-        charAspect = 100 / asciiW
-        emptyChar = " "
-      }
+
+      const bitmap = rasterizeCharToBitmap(ch, sourceFont.stack, cellSize, threshold)
+      bitmapCache.set(ch, bitmap)
+      if (bitmap) charBitmaps.push(bitmap)
     }
 
-    const cellH = cellW * charAspect
-    const rows = Math.ceil(offscreen.height / cellH)
+    if (charBitmaps.length === 0) return null
 
-    const SUB = 2
-    const darkGrid: boolean[][] = []
-    for (let r = 0; r < rows; r++) {
-      const row: boolean[] = []
-      for (let c = 0; c < cols; c++) {
-        let brightSum = 0
-        let sampleCount = 0
-        for (let sy = 0; sy < SUB; sy++) {
-          for (let sx = 0; sx < SUB; sx++) {
-            const x = Math.floor((c + (sx + 0.5) / SUB) * cellW)
-            const y = Math.floor((r + (sy + 0.5) / SUB) * cellH)
-            if (x >= 0 && x < offscreen.width && y >= 0 && y < offscreen.height) {
-              const p = (y * offscreen.width + x) * 4
-              brightSum += (img[p] + img[p + 1] + img[p + 2]) / 3
-              sampleCount++
-            }
-          }
-        }
-        const bright = sampleCount > 0 ? brightSum / sampleCount : 255
-        row.push(bright < 140)
-      }
-      darkGrid.push(row)
-    }
+    const canvas = renderPixelArt(targetGrid, charBitmaps, {
+      cellSize,
+      offsetX,
+      offsetY,
+      textColor,
+      bgColor,
+      scale,
+    })
 
-    const convertChar = (ch: string): string => hasCJK ? toFullwidth(ch) : ch
-
-    const charLines: string[][] = []
-
-    if (preventTruncation) {
-      const words = source.split(/\s+/).filter((w) => w.length > 0)
-      if (words.length === 0) return null
-
-      const wordChars: string[][] = words.map((w) => [...w].map(convertChar))
-
-      let wordIdx = 0
-      let charInWord = 0
-
-      for (let r = 0; r < rows; r++) {
-        const darkCols: number[] = []
-        for (let c = 0; c < cols; c++) {
-          if (darkGrid[r][c]) darkCols.push(c)
-        }
-
-        const rowChars: string[] = new Array(cols).fill(emptyChar)
-        let darkPtr = 0
-
-        while (darkPtr < darkCols.length) {
-          if (wordIdx >= wordChars.length) {
-            wordIdx = 0
-            charInWord = 0
-          }
-
-          const word = wordChars[wordIdx]
-          const remainingInWord = word.length - charInWord
-          const remainingDark = darkCols.length - darkPtr
-
-          if (remainingInWord <= remainingDark) {
-            for (let i = 0; i < remainingInWord; i++) {
-              rowChars[darkCols[darkPtr]] = word[charInWord + i]
-              darkPtr++
-            }
-            wordIdx++
-            charInWord = 0
-          } else if (remainingInWord > darkCols.length) {
-            for (let i = 0; i < remainingDark; i++) {
-              rowChars[darkCols[darkPtr]] = word[charInWord + i]
-              darkPtr++
-            }
-            charInWord += remainingDark
-            break
-          } else {
-            break
-          }
-        }
-
-        charLines.push(rowChars)
-      }
-    } else {
-      const src = [...source].map(convertChar)
-      let idx = 0
-      for (let r = 0; r < rows; r++) {
-        const rowChars: string[] = []
-        for (let c = 0; c < cols; c++) {
-          if (darkGrid[r][c]) {
-            rowChars.push(src[idx % src.length])
-            idx++
-          } else {
-            rowChars.push(emptyChar)
-          }
-        }
-        charLines.push(rowChars)
-      }
-    }
-
-    const charH = fontSize
-    const charW = hasCJK ? charH : charH * 0.6
-    const lineSpacing = fontSize * 1.0
-
-    const outputWidth = Math.ceil(cols * charW + 48)
-    const outputHeight = Math.ceil(rows * lineSpacing + 48)
-
-    const outputCanvas = document.createElement("canvas")
-    outputCanvas.width = outputWidth
-    outputCanvas.height = outputHeight
-    const octx = outputCanvas.getContext("2d")
-    if (!octx) return null
-
-    if (bgColor !== "transparent") {
-      octx.fillStyle = bgColor
-      octx.fillRect(0, 0, outputWidth, outputHeight)
-    } else {
-      octx.clearRect(0, 0, outputWidth, outputHeight)
-    }
-
-    octx.fillStyle = textColor
-    octx.font = `700 ${fontSize}px ${sourceFont.stack}`
-    octx.textBaseline = "top"
-    octx.textAlign = "left"
-
-    for (let r = 0; r < charLines.length; r++) {
-      const chars = charLines[r]
-      for (let c = 0; c < chars.length; c++) {
-        octx.fillText(chars[c], 24 + c * charW, 24 + r * lineSpacing)
-      }
-    }
-
-    return outputCanvas
-  }, [source, target, targetFontSize, targetFont.stack, sourceFont.stack, fontSize, textColor, bgColor, preventTruncation, hasCJK])
+    return canvas
+  }, [source, target, cellSize, targetFontSize, targetFont.stack, sourceFont.stack, textColor, bgColor, offsetX, offsetY, scale, threshold])
 
   useEffect(() => {
-    const canvas = renderBigWordToCanvas()
+    const canvas = renderPixelArtToCanvas()
     renderCanvasRef.current = canvas
 
     const displayCanvas = canvasRef.current
@@ -638,7 +682,7 @@ export default function ImagePage() {
         octx.clearRect(0, 0, overlay.width, overlay.height)
       }
     }
-  }, [renderBigWordToCanvas])
+  }, [renderPixelArtToCanvas])
 
   const getCanvasCoords = useCallback((e: React.MouseEvent) => {
     const overlay = overlayCanvasRef.current
@@ -749,7 +793,7 @@ export default function ImagePage() {
       const url = URL.createObjectURL(blob)
       const a = document.createElement("a")
       a.href = url
-      a.download = `bigword-image-${target.slice(0, 10) || "output"}.png`
+      a.download = `bigword-pixel-${target.slice(0, 10) || "output"}.png`
       a.click()
       URL.revokeObjectURL(url)
     }, "image/png")
@@ -780,13 +824,18 @@ export default function ImagePage() {
   const handleReset = () => {
     setSource("鳖鳖")
     setTarget("赖疙宝")
-    setFontSize(10)
+    setCellSize(12)
     setTargetFontSize(320)
     setTargetFontId("yahei")
     setSourceFontId("yahei")
     setTextColor("#818cf8")
     setBgColor("#0f172a")
-    setPreventTruncation(false)
+    setCharSpacing(0)
+    setLineSpacing(0)
+    setOffsetX(0)
+    setOffsetY(0)
+    setScale(1)
+    setThreshold(128)
     setZoom(1)
     setPanOffset({ x: 0, y: 0 })
     handleClearOverlay()
@@ -856,7 +905,7 @@ export default function ImagePage() {
               像素画板
             </span>
           </h1>
-          <p className="text-slate-500 mt-2 text-sm">用小字符画大字符，直接输出图片，像素级微调</p>
+          <p className="text-slate-500 mt-2 text-sm">像素级渲染 · 逐像素控制 · 精确到每一个撇捺</p>
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-[320px_1fr] gap-5">
@@ -872,7 +921,7 @@ export default function ImagePage() {
                   rows={3}
                   value={source}
                   onChange={(e) => setSource(e.target.value)}
-                  placeholder="作为字符来源的文本，例如：Hello"
+                  placeholder="作为字符来源的文本"
                 />
                 <div className="flex items-center justify-between">
                   <span className="stat-chip">
@@ -885,15 +934,6 @@ export default function ImagePage() {
                         CJK
                       </span>
                     )}
-                    <label className="flex items-center gap-1 cursor-pointer select-none text-xs text-slate-500">
-                      <input
-                        type="checkbox"
-                        checked={preventTruncation}
-                        onChange={(e) => setPreventTruncation(e.target.checked)}
-                        className="w-3.5 h-3.5 rounded border-slate-300 text-indigo-500 cursor-pointer accent-indigo-500"
-                      />
-                      防截断
-                    </label>
                     <button
                       onClick={handleShuffle}
                       className="text-slate-400 hover:text-amber-500 transition-colors p-1.5 rounded-lg hover:bg-amber-50 cursor-pointer"
@@ -930,7 +970,7 @@ export default function ImagePage() {
                   rows={3}
                   value={target}
                   onChange={(e) => setTarget(e.target.value)}
-                  placeholder="最终要呈现的内容，例如：HI"
+                  placeholder="最终要呈现的内容"
                 />
                 <div className="space-y-1.5">
                   <label className="text-xs text-slate-500 font-medium">目标字体</label>
@@ -951,21 +991,21 @@ export default function ImagePage() {
             <Card className="flat-card border-0 shadow-sm animate-fade-in-up animation-delay-200">
               <CardContent className="p-4 space-y-3">
                 <span className="label-pill" style={{ color: "#f59e0b" }}>
-                  <Palette className="w-3.5 h-3.5" />
-                  样式设置
+                  <Grid3x3 className="w-3.5 h-3.5" />
+                  像素网格
                 </span>
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between">
-                    <label className="text-xs text-slate-500 font-medium">小字字号</label>
-                    <span className="stat-chip">{fontSize}px</span>
+                    <label className="text-xs text-slate-500 font-medium">网格单元大小</label>
+                    <span className="stat-chip">{cellSize}px</span>
                   </div>
                   <input
                     type="range"
                     min={4}
-                    max={24}
+                    max={32}
                     step={1}
-                    value={fontSize}
-                    onChange={(e) => setFontSize(Number(e.target.value))}
+                    value={cellSize}
+                    onChange={(e) => setCellSize(Number(e.target.value))}
                     className="tool-slider"
                   />
                 </div>
@@ -981,6 +1021,107 @@ export default function ImagePage() {
                     step={10}
                     value={targetFontSize}
                     onChange={(e) => setTargetFontSize(Number(e.target.value))}
+                    className="tool-slider"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs text-slate-500 font-medium">阈值</label>
+                    <span className="stat-chip">{threshold}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={32}
+                    max={224}
+                    step={1}
+                    value={threshold}
+                    onChange={(e) => setThreshold(Number(e.target.value))}
+                    className="tool-slider"
+                  />
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card className="flat-card border-0 shadow-sm animate-fade-in-up animation-delay-300">
+              <CardContent className="p-4 space-y-3">
+                <span className="label-pill" style={{ color: "#8b5cf6" }}>
+                  <Move className="w-3.5 h-3.5" />
+                  精细控制
+                </span>
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs text-slate-500 font-medium">字符间距</label>
+                    <span className="stat-chip">{charSpacing}px</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={-10}
+                    max={20}
+                    step={1}
+                    value={charSpacing}
+                    onChange={(e) => setCharSpacing(Number(e.target.value))}
+                    className="tool-slider"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs text-slate-500 font-medium">行间距</label>
+                    <span className="stat-chip">{lineSpacing}px</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={-10}
+                    max={20}
+                    step={1}
+                    value={lineSpacing}
+                    onChange={(e) => setLineSpacing(Number(e.target.value))}
+                    className="tool-slider"
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between">
+                      <label className="text-xs text-slate-500 font-medium">X偏移</label>
+                      <span className="stat-chip">{offsetX}px</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={-20}
+                      max={20}
+                      step={1}
+                      value={offsetX}
+                      onChange={(e) => setOffsetX(Number(e.target.value))}
+                      className="tool-slider"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between">
+                      <label className="text-xs text-slate-500 font-medium">Y偏移</label>
+                      <span className="stat-chip">{offsetY}px</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={-20}
+                      max={20}
+                      step={1}
+                      value={offsetY}
+                      onChange={(e) => setOffsetY(Number(e.target.value))}
+                      className="tool-slider"
+                    />
+                  </div>
+                </div>
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs text-slate-500 font-medium">整体缩放</label>
+                    <span className="stat-chip">{scale.toFixed(1)}x</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0.5}
+                    max={3}
+                    step={0.1}
+                    value={scale}
+                    onChange={(e) => setScale(Number(e.target.value))}
                     className="tool-slider"
                   />
                 </div>
@@ -1214,7 +1355,7 @@ export default function ImagePage() {
                             linear-gradient(to right, rgba(100,116,139,0.3) 1px, transparent 1px),
                             linear-gradient(to bottom, rgba(100,116,139,0.3) 1px, transparent 1px)
                           `,
-                          backgroundSize: "1px 1px",
+                          backgroundSize: `${cellSize * scale}px ${cellSize * scale}px`,
                           pointerEvents: "none",
                         }}
                       />
@@ -1234,20 +1375,20 @@ export default function ImagePage() {
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div className="feature-card p-4 animate-fade-in-up animation-delay-100">
                 <div className="w-10 h-10 mb-3 rounded-xl bg-pink-100 flex items-center justify-center">
-                  <Type className="w-5 h-5 text-pink-600" />
+                  <Grid3x3 className="w-5 h-5 text-pink-600" />
                 </div>
-                <h3 className="font-bold mb-1 text-slate-800 text-sm">字符画转图片</h3>
+                <h3 className="font-bold mb-1 text-slate-800 text-sm">像素级渲染</h3>
                 <p className="text-slate-500 text-xs leading-relaxed">
-                  用小字符填充大字符形状，直接渲染为高清图片
+                  每个撇捺都是独立像素，精确控制每一笔
                 </p>
               </div>
               <div className="feature-card p-4 animate-fade-in-up animation-delay-200">
                 <div className="w-10 h-10 mb-3 rounded-xl bg-rose-100 flex items-center justify-center">
-                  <Pencil className="w-5 h-5 text-rose-600" />
+                  <Move className="w-5 h-5 text-rose-600" />
                 </div>
-                <h3 className="font-bold mb-1 text-slate-800 text-sm">像素微调</h3>
+                <h3 className="font-bold mb-1 text-slate-800 text-sm">精细间距控制</h3>
                 <p className="text-slate-500 text-xs leading-relaxed">
-                  画笔、橡皮擦、取色器，放大后逐像素编辑
+                  字符间距、行间距、逐像素偏移
                 </p>
               </div>
               <div className="feature-card p-4 animate-fade-in-up animation-delay-300">
@@ -1256,7 +1397,7 @@ export default function ImagePage() {
                 </div>
                 <h3 className="font-bold mb-1 text-slate-800 text-sm">高清导出</h3>
                 <p className="text-slate-500 text-xs leading-relaxed">
-                  导出 PNG 格式，包含所有编辑内容
+                  导出 PNG 格式，保留所有像素细节
                 </p>
               </div>
             </div>
