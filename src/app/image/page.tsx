@@ -127,72 +127,66 @@ function containsCJK(text: string): boolean {
   return false
 }
 
-// Rasterize a single character into a pixel bitmap (boolean[][] = true means pixel is "on")
-function rasterizeCharToBitmap(
-  char: string,
-  fontStack: string,
-  cellSize: number,
-  threshold: number
-): boolean[][] | null {
-  if (!char || isSpace(char)) return null
-
-  const renderSize = cellSize * 3
-  const canvas = document.createElement("canvas")
-  canvas.width = renderSize
-  canvas.height = renderSize
-  const ctx = canvas.getContext("2d")
-  if (!ctx) return null
-
-  ctx.fillStyle = "#000000"
-  ctx.fillRect(0, 0, renderSize, renderSize)
-  ctx.fillStyle = "#ffffff"
-  ctx.font = `700 ${renderSize * 0.8}px ${fontStack}`
-  ctx.textBaseline = "middle"
-  ctx.textAlign = "center"
-  ctx.fillText(char, renderSize / 2, renderSize / 2)
-
-  const imageData = ctx.getImageData(0, 0, renderSize, renderSize)
-  const pixels = imageData.data
-
-  let minX = renderSize, minY = renderSize, maxX = 0, maxY = 0
-  for (let y = 0; y < renderSize; y++) {
-    for (let x = 0; x < renderSize; x++) {
-      const p = (y * renderSize + x) * 4
-      const bright = (pixels[p] + pixels[p + 1] + pixels[p + 2]) / 3
-      if (bright > threshold) {
-        minX = Math.min(minX, x)
-        minY = Math.min(minY, y)
-        maxX = Math.max(maxX, x)
-        maxY = Math.max(maxY, y)
-      }
-    }
+// Fullwidth conversion: when source contains CJK, convert all half-width ASCII
+// (letters, digits, punctuation, space) to their fullwidth equivalents so every
+// character has identical width. This makes mixed CJK+English+numbers align.
+function toFullwidth(ch: string): string {
+  const code = ch.codePointAt(0)
+  if (code === undefined) return ch
+  // Space → ideographic space (U+3000)
+  if (code === 0x20) return "\u3000"
+  // ASCII printable (0x21..0x7E) → fullwidth (U+FF01..U+FF5E)
+  if (code >= 0x21 && code <= 0x7e) {
+    return String.fromCodePoint(code + 0xfee0)
   }
-
-  if (minX > maxX || minY > maxY) return null
-
-  const w = maxX - minX + 1
-  const h = maxY - minY + 1
-  const bitmap: boolean[][] = []
-  for (let y = 0; y < h; y++) {
-    const row: boolean[] = []
-    for (let x = 0; x < w; x++) {
-      const p = ((minY + y) * renderSize + (minX + x)) * 4
-      const bright = (pixels[p] + pixels[p + 1] + pixels[p + 2]) / 3
-      row.push(bright > threshold)
-    }
-    bitmap.push(row)
-  }
-  return bitmap
+  return ch
 }
 
-// Rasterize target text into a CELL grid (downsample by cellSize)
-// Each grid element represents a cell of cellSize×cellSize pixels
+// Cell metrics: measure actual character width of the chosen source font.
+// CJK mode → measure a CJK glyph (full-width / square) and use ideographic
+// space (U+3000) for empty cells. ASCII mode → measure 'M'.
+interface CellMetrics {
+  charAspect: number  // cellH / cellW
+  emptyChar: string   // " " for ASCII, "\u3000" for CJK
+}
+
+function measureCellMetrics(fontStack: string, hasCJK: boolean): CellMetrics {
+  const fallback: CellMetrics = { charAspect: 1.0, emptyChar: " " }
+  if (typeof window === "undefined") return fallback
+  try {
+    const probe = document.createElement("span")
+    probe.style.cssText =
+      `font-family:${fontStack};font-size:100px;font-weight:700;` +
+      `position:absolute;visibility:hidden;white-space:pre;` +
+      `letter-spacing:0;line-height:1;`
+    document.body.appendChild(probe)
+
+    if (hasCJK) {
+      probe.textContent = "\u5b57"
+      const cjkW = probe.getBoundingClientRect().width
+      document.body.removeChild(probe)
+      if (!cjkW || !isFinite(cjkW)) return { charAspect: 1.0, emptyChar: "\u3000" }
+      return { charAspect: 100 / cjkW, emptyChar: "\u3000" }
+    } else {
+      probe.textContent = "M"
+      const asciiW = probe.getBoundingClientRect().width
+      document.body.removeChild(probe)
+      if (!asciiW || !isFinite(asciiW)) return fallback
+      return { charAspect: 100 / asciiW, emptyChar: " " }
+    }
+  } catch {
+    return fallback
+  }
+}
+
+// Rasterize target text into a dark/light cell grid using BigWord's algorithm:
+// WHITE background + BLACK text, threshold = 140 (bright < 140 → dark),
+// 2×2 area-averaged sub-sampling, cols derived from target font size.
 function rasterizeTargetToCellGrid(
   target: string,
   fontStack: string,
   targetFontSize: number,
-  cellSize: number,
-  threshold: number
+  charAspect: number,
 ): { grid: boolean[][]; cols: number; rows: number } | null {
   if (!target || target.trim() === "") return null
 
@@ -200,42 +194,50 @@ function rasterizeTargetToCellGrid(
   const ctx = canvas.getContext("2d")
   if (!ctx) return null
 
+  const baseFont = Math.max(40, targetFontSize)
+  const font = `900 ${baseFont}px ${fontStack}`
+  ctx.font = font
+
   const lines = target.split("\n")
-  const lineH = targetFontSize * 1.35
-  const padding = Math.ceil(targetFontSize * 0.5)
+  const lineH = baseFont * 1.35
+  const padding = Math.round(baseFont * 0.35)
 
-  ctx.font = `900 ${targetFontSize}px ${fontStack}`
-
-  let maxWidth = 0
-  for (const line of lines) {
-    const m = ctx.measureText(line || " ")
-    maxWidth = Math.max(maxWidth, m.width)
+  // Measure actual ink bounds (ascent/descent) to prevent glyph clipping
+  let maxW = 0
+  let maxAscent = 0
+  let maxDescent = 0
+  for (const l of lines) {
+    const m = ctx.measureText(l || " ")
+    maxW = Math.max(maxW, m.width)
+    if (m.actualBoundingBoxAscent) maxAscent = Math.max(maxAscent, m.actualBoundingBoxAscent)
+    if (m.actualBoundingBoxDescent) maxDescent = Math.max(maxDescent, m.actualBoundingBoxDescent)
   }
+  // Fallbacks for browsers without ink-bound support
+  if (maxAscent === 0) maxAscent = baseFont * 0.85
+  if (maxDescent === 0) maxDescent = baseFont * 0.25
 
-  const imgW = Math.ceil(maxWidth + padding * 2)
-  const imgH = Math.ceil(lines.length * lineH + padding * 2)
+  canvas.width = Math.max(1, Math.ceil(maxW + padding * 2))
+  canvas.height = Math.max(1, Math.ceil(maxAscent + maxDescent + (lines.length - 1) * lineH + padding * 2))
 
-  canvas.width = imgW
-  canvas.height = imgH
-
-  ctx.fillStyle = "#000000"
-  ctx.fillRect(0, 0, imgW, imgH)
+  // canvas resize resets context state — re-apply
   ctx.fillStyle = "#ffffff"
-  ctx.font = `900 ${targetFontSize}px ${fontStack}`
-  ctx.textBaseline = "top"
+  ctx.fillRect(0, 0, canvas.width, canvas.height)
+  ctx.fillStyle = "#000000"
+  ctx.font = font
+  ctx.textBaseline = "alphabetic"
   ctx.textAlign = "left"
-  for (let i = 0; i < lines.length; i++) {
-    ctx.fillText(lines[i], padding, padding + i * lineH)
-  }
+  lines.forEach((l, i) => ctx.fillText(l, padding, padding + maxAscent + i * lineH))
 
-  const imageData = ctx.getImageData(0, 0, imgW, imgH)
-  const pixels = imageData.data
+  const img = ctx.getImageData(0, 0, canvas.width, canvas.height).data
 
-  // Downsample: each cell = cellSize×cellSize pixels, sample with SUB×SUB sub-samples
-  const cols = Math.max(1, Math.ceil(imgW / cellSize))
-  const rows = Math.max(1, Math.ceil(imgH / cellSize))
+  // cols derived from target font size (density redundancy)
+  const cols = Math.max(8, Math.round(baseFont * 0.375))
+  const cellW = canvas.width / cols
+  const cellH = cellW * charAspect
+  const rows = Math.ceil(canvas.height / cellH)
 
-  const SUB = 3
+  // 2×2 area-averaged sub-sampling; bright < 140 → cell is "dark" (part of char)
+  const SUB = 2
   const grid: boolean[][] = []
   for (let r = 0; r < rows; r++) {
     const row: boolean[] = []
@@ -244,18 +246,17 @@ function rasterizeTargetToCellGrid(
       let sampleCount = 0
       for (let sy = 0; sy < SUB; sy++) {
         for (let sx = 0; sx < SUB; sx++) {
-          const x = Math.floor((c + (sx + 0.5) / SUB) * cellSize)
-          const y = Math.floor((r + (sy + 0.5) / SUB) * cellSize)
-          if (x >= 0 && x < imgW && y >= 0 && y < imgH) {
-            const p = (y * imgW + x) * 4
-            brightSum += (pixels[p] + pixels[p + 1] + pixels[p + 2]) / 3
+          const x = Math.floor((c + (sx + 0.5) / SUB) * cellW)
+          const y = Math.floor((r + (sy + 0.5) / SUB) * cellH)
+          if (x >= 0 && x < canvas.width && y >= 0 && y < canvas.height) {
+            const p = (y * canvas.width + x) * 4
+            brightSum += (img[p] + img[p + 1] + img[p + 2]) / 3
             sampleCount++
           }
         }
       }
-      // Text is white on black background, so a cell is "on" (part of the character) if brightness is ABOVE threshold
-      const bright = sampleCount > 0 ? brightSum / sampleCount : 0
-      row.push(bright > threshold)
+      const bright = sampleCount > 0 ? brightSum / sampleCount : 255
+      row.push(bright < 140)
     }
     grid.push(row)
   }
@@ -263,39 +264,36 @@ function rasterizeTargetToCellGrid(
   return { grid, cols, rows }
 }
 
-// Render the pixel art: for each dark cell, place one source character
+// Render pixel art directly to canvas using ctx.fillText (not pixel-by-pixel
+// bitmap drawing). For each dark cell, place one source character; bright
+// cells are skipped (left as background).
 function renderPixelArt(
   cellGrid: { grid: boolean[][]; cols: number; rows: number },
   source: string,
-  fontStack: string,
-  cellSize: number,
-  threshold: number,
+  sourceFontStack: string,
+  charAspect: number,
+  fontSize: number,
   options: {
-    offsetX: number
-    offsetY: number
     textColor: string
     bgColor: string
-    scale: number
     preventTruncation: boolean
-  }
+    hasCJK: boolean
+    offsetX: number
+    offsetY: number
+  },
 ): HTMLCanvasElement | null {
   if (!cellGrid || !source) return null
 
   const { grid, cols, rows } = cellGrid
-  const { offsetX, offsetY, textColor, bgColor, scale, preventTruncation } = options
+  const { textColor, bgColor, preventTruncation, hasCJK, offsetX, offsetY } = options
 
-  // Cache character bitmaps
-  const bitmapCache = new Map<string, boolean[][] | null>()
-  const getBitmap = (ch: string): boolean[][] | null => {
-    if (!bitmapCache.has(ch)) {
-      bitmapCache.set(ch, rasterizeCharToBitmap(ch, fontStack, cellSize, threshold))
-    }
-    return bitmapCache.get(ch)!
-  }
+  // Output character sizing
+  const charW = fontSize / charAspect  // each char's pixel width on output canvas
+  const lineH = fontSize * 1.0         // line height = fontSize
+  const padding = 24
 
-  const cellPixelSize = cellSize * scale
-  const outputW = Math.ceil(cols * cellPixelSize)
-  const outputH = Math.ceil(rows * cellPixelSize)
+  const outputW = Math.ceil(cols * charW + padding * 2)
+  const outputH = Math.ceil(rows * lineH + padding * 2)
 
   const canvas = document.createElement("canvas")
   canvas.width = outputW
@@ -303,6 +301,7 @@ function renderPixelArt(
   const ctx = canvas.getContext("2d")
   if (!ctx) return null
 
+  // Background
   if (bgColor !== "transparent") {
     ctx.fillStyle = bgColor
     ctx.fillRect(0, 0, outputW, outputH)
@@ -310,35 +309,16 @@ function renderPixelArt(
     ctx.clearRect(0, 0, outputW, outputH)
   }
 
+  // Text style
+  ctx.font = `700 ${fontSize}px ${sourceFontStack}`
+  ctx.textBaseline = "top"
+  ctx.textAlign = "left"
   ctx.fillStyle = textColor
 
-  // Helper: draw a character bitmap centered in a cell
-  const drawBitmap = (bitmap: boolean[][], cellCol: number, cellRow: number) => {
-    const bw = bitmap[0]?.length ?? 0
-    const bh = bitmap.length
-    if (bw === 0 || bh === 0) return
+  // CJK mode → convert chars to fullwidth for equal width
+  const convertChar = (ch: string): string => hasCJK ? toFullwidth(ch) : ch
 
-    // Scale bitmap to fit within cell (with small padding)
-    const padFrac = 0.05
-    const avail = cellPixelSize * (1 - padFrac * 2)
-    const drawScale = Math.min(avail / bw, avail / bh)
-    const startX = cellCol * cellPixelSize + (cellPixelSize - bw * drawScale) / 2 + offsetX * scale
-    const startY = cellRow * cellPixelSize + (cellPixelSize - bh * drawScale) / 2 + offsetY * scale
-
-    for (let by = 0; by < bh; by++) {
-      for (let bx = 0; bx < bw; bx++) {
-        if (!bitmap[by][bx]) continue
-        ctx.fillRect(
-          Math.floor(startX + bx * drawScale),
-          Math.floor(startY + by * drawScale),
-          Math.max(1, Math.ceil(drawScale)),
-          Math.max(1, Math.ceil(drawScale))
-        )
-      }
-    }
-  }
-
-  // Helper: get list of dark cell columns for a given row
+  // Helper: list of dark cell columns for a given row
   const getDarkCols = (row: number): number[] => {
     const result: number[] = []
     for (let c = 0; c < cols; c++) {
@@ -348,20 +328,11 @@ function renderPixelArt(
   }
 
   if (preventTruncation) {
-    // Split source into words (separated by spaces)
-    const rawChars = [...source]
-    const words: string[][] = []
-    let wi = 0
-    while (wi < rawChars.length) {
-      if (isSpace(rawChars[wi])) { wi++; continue }
-      const word: string[] = []
-      while (wi < rawChars.length && !isSpace(rawChars[wi])) {
-        word.push(rawChars[wi])
-        wi++
-      }
-      if (word.length > 0) words.push(word)
-    }
+    // Word-based placement: each word must render fully, never split mid-word
+    const words = source.split(/\s+/).filter((w) => w.length > 0)
     if (words.length === 0) return canvas
+
+    const wordChars: string[][] = words.map((w) => [...w].map(convertChar))
 
     let wordIdx = 0
     let charInWord = 0
@@ -372,64 +343,68 @@ function renderPixelArt(
 
       let darkPtr = 0
       while (darkPtr < darkCols.length) {
-        if (wordIdx >= words.length) {
+        if (wordIdx >= wordChars.length) {
           wordIdx = 0
           charInWord = 0
         }
 
-        const word = words[wordIdx]
+        const word = wordChars[wordIdx]
         const remainingInWord = word.length - charInWord
         const remainingDark = darkCols.length - darkPtr
 
         if (remainingInWord <= remainingDark) {
-          // The whole word fits in remaining dark cells
+          // Word fits in remaining dark cells - place all chars
           for (let i = 0; i < remainingInWord; i++) {
             const ch = word[charInWord + i]
-            const bitmap = getBitmap(ch)
-            if (bitmap) drawBitmap(bitmap, darkCols[darkPtr], r)
+            if (!isSpace(ch)) {
+              ctx.fillText(
+                ch,
+                padding + darkCols[darkPtr] * charW + offsetX,
+                padding + r * lineH + offsetY,
+              )
+            }
             darkPtr++
           }
-          // Word complete - advance to next word, leave a gap (skip one dark cell)
           wordIdx++
           charInWord = 0
-          if (darkPtr < darkCols.length) {
-            darkPtr++ // gap between words
-          }
         } else if (remainingInWord > darkCols.length) {
-          // Word is longer than the entire row - place what fits, continue next row
+          // Word longer than the entire row - place what fits, continue next row
           for (let i = 0; i < remainingDark; i++) {
             const ch = word[charInWord + i]
-            const bitmap = getBitmap(ch)
-            if (bitmap) drawBitmap(bitmap, darkCols[darkPtr], r)
+            if (!isSpace(ch)) {
+              ctx.fillText(
+                ch,
+                padding + darkCols[darkPtr] * charW + offsetX,
+                padding + r * lineH + offsetY,
+              )
+            }
             darkPtr++
           }
           charInWord += remainingDark
           break // move to next row
         } else {
-          // Word doesn't fit in remaining cells but fits in full row - skip to next row
+          // Word fits in full row but not remaining space - skip to next row
           break
         }
       }
     }
   } else {
-    // Simple mode: place characters sequentially, spaces create gaps
-    const sourceChars = [...source]
-    if (sourceChars.length === 0) return canvas
+    // Normal mode: cycle source chars across dark cells
+    const src = [...source].map(convertChar)
+    if (src.length === 0) return canvas
 
-    let charIdx = 0
+    let idx = 0
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
-        if (!grid[r][c]) continue
-
-        if (charIdx >= sourceChars.length) charIdx = 0
-        const ch = sourceChars[charIdx]
-        charIdx++
-
-        // Spaces create gaps (skip the cell)
-        if (isSpace(ch)) continue
-
-        const bitmap = getBitmap(ch)
-        if (bitmap) drawBitmap(bitmap, c, r)
+        if (!grid[r][c]) continue // bright cell - skip
+        const ch = src[idx % src.length]
+        idx++
+        if (isSpace(ch)) continue // don't draw spaces
+        ctx.fillText(
+          ch,
+          padding + c * charW + offsetX,
+          padding + r * lineH + offsetY,
+        )
       }
     }
   }
@@ -658,12 +633,8 @@ export default function ImagePage() {
   const [sourceFontId, setSourceFontId] = useState("yahei")
   const [textColor, setTextColor] = useState("#818cf8")
   const [bgColor, setBgColor] = useState("#0f172a")
-  const [charSpacing, setCharSpacing] = useState(0)
-  const [lineSpacing, setLineSpacing] = useState(0)
   const [offsetX, setOffsetX] = useState(0)
   const [offsetY, setOffsetY] = useState(0)
-  const [scale, setScale] = useState(1)
-  const [threshold, setThreshold] = useState(128)
   const [preventTruncation, setPreventTruncation] = useState(false)
 
   const [zoom, setZoom] = useState(1)
@@ -723,20 +694,21 @@ export default function ImagePage() {
   const renderPixelArtToCanvas = useCallback(() => {
     if (!source || !target.trim()) return null
 
-    const cellGrid = rasterizeTargetToCellGrid(target, targetFont.stack, targetFontSize, cellSize, threshold)
+    const metrics = measureCellMetrics(sourceFont.stack, hasCJK)
+    const cellGrid = rasterizeTargetToCellGrid(target, targetFont.stack, targetFontSize, metrics.charAspect)
     if (!cellGrid) return null
 
-    const canvas = renderPixelArt(cellGrid, source, sourceFont.stack, cellSize, threshold, {
-      offsetX,
-      offsetY,
+    const canvas = renderPixelArt(cellGrid, source, sourceFont.stack, metrics.charAspect, cellSize, {
       textColor,
       bgColor,
-      scale,
       preventTruncation,
+      hasCJK,
+      offsetX,
+      offsetY,
     })
 
     return canvas
-  }, [source, target, cellSize, targetFontSize, targetFont.stack, sourceFont.stack, textColor, bgColor, offsetX, offsetY, scale, threshold, preventTruncation])
+  }, [source, target, cellSize, targetFontSize, targetFont.stack, sourceFont.stack, textColor, bgColor, offsetX, offsetY, preventTruncation, hasCJK])
 
   useEffect(() => {
     const canvas = renderPixelArtToCanvas()
@@ -908,12 +880,8 @@ export default function ImagePage() {
     setSourceFontId("yahei")
     setTextColor("#818cf8")
     setBgColor("#0f172a")
-    setCharSpacing(0)
-    setLineSpacing(0)
     setOffsetX(0)
     setOffsetY(0)
-    setScale(1)
-    setThreshold(128)
     setPreventTruncation(false)
     setZoom(1)
     setPanOffset({ x: 0, y: 0 })
@@ -1112,21 +1080,6 @@ export default function ImagePage() {
                     className="tool-slider"
                   />
                 </div>
-                <div className="space-y-1.5">
-                  <div className="flex items-center justify-between">
-                    <label className="text-xs text-slate-500 font-medium">阈值</label>
-                    <span className="stat-chip">{threshold}</span>
-                  </div>
-                  <input
-                    type="range"
-                    min={32}
-                    max={224}
-                    step={1}
-                    value={threshold}
-                    onChange={(e) => setThreshold(Number(e.target.value))}
-                    className="tool-slider"
-                  />
-                </div>
               </CardContent>
             </Card>
 
@@ -1136,36 +1089,6 @@ export default function ImagePage() {
                   <Move className="w-3.5 h-3.5" />
                   精细控制
                 </span>
-                <div className="space-y-1.5">
-                  <div className="flex items-center justify-between">
-                    <label className="text-xs text-slate-500 font-medium">字符间距</label>
-                    <span className="stat-chip">{charSpacing}px</span>
-                  </div>
-                  <input
-                    type="range"
-                    min={-10}
-                    max={20}
-                    step={1}
-                    value={charSpacing}
-                    onChange={(e) => setCharSpacing(Number(e.target.value))}
-                    className="tool-slider"
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <div className="flex items-center justify-between">
-                    <label className="text-xs text-slate-500 font-medium">行间距</label>
-                    <span className="stat-chip">{lineSpacing}px</span>
-                  </div>
-                  <input
-                    type="range"
-                    min={-10}
-                    max={20}
-                    step={1}
-                    value={lineSpacing}
-                    onChange={(e) => setLineSpacing(Number(e.target.value))}
-                    className="tool-slider"
-                  />
-                </div>
                 <div className="grid grid-cols-2 gap-2">
                   <div className="space-y-1">
                     <div className="flex items-center justify-between">
@@ -1197,21 +1120,6 @@ export default function ImagePage() {
                       className="tool-slider"
                     />
                   </div>
-                </div>
-                <div className="space-y-1.5">
-                  <div className="flex items-center justify-between">
-                    <label className="text-xs text-slate-500 font-medium">整体缩放</label>
-                    <span className="stat-chip">{scale.toFixed(1)}x</span>
-                  </div>
-                  <input
-                    type="range"
-                    min={0.5}
-                    max={3}
-                    step={0.1}
-                    value={scale}
-                    onChange={(e) => setScale(Number(e.target.value))}
-                    className="tool-slider"
-                  />
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="text-xs text-slate-500 font-medium">文字颜色</span>
@@ -1443,7 +1351,7 @@ export default function ImagePage() {
                             linear-gradient(to right, rgba(100,116,139,0.3) 1px, transparent 1px),
                             linear-gradient(to bottom, rgba(100,116,139,0.3) 1px, transparent 1px)
                           `,
-                          backgroundSize: `${cellSize * scale}px ${cellSize * scale}px`,
+                          backgroundSize: `${cellSize}px ${cellSize}px`,
                           pointerEvents: "none",
                         }}
                       />
@@ -1474,9 +1382,9 @@ export default function ImagePage() {
                 <div className="w-10 h-10 mb-3 rounded-xl bg-rose-100 flex items-center justify-center">
                   <Move className="w-5 h-5 text-rose-600" />
                 </div>
-                <h3 className="font-bold mb-1 text-slate-800 text-sm">精细间距控制</h3>
+                <h3 className="font-bold mb-1 text-slate-800 text-sm">精细偏移控制</h3>
                 <p className="text-slate-500 text-xs leading-relaxed">
-                  字符间距、行间距、逐像素偏移
+                  逐像素偏移、全角半角自适应对齐
                 </p>
               </div>
               <div className="feature-card p-4 animate-fade-in-up animation-delay-300">
