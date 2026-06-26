@@ -179,65 +179,104 @@ function measureCellMetrics(fontStack: string, hasCJK: boolean): CellMetrics {
   }
 }
 
-// Rasterize target text into a dark/light cell grid using BigWord's algorithm:
-// WHITE background + BLACK text, threshold = 140 (bright < 140 → dark),
-// 2×2 area-averaged sub-sampling, cols derived from target font size.
+// Otsu's method: find optimal threshold that separates dark/bright bimodal histogram
+function otsuThreshold(hist: number[], total: number): number {
+  let sum = 0
+  for (let i = 0; i < 256; i++) sum += i * hist[i]
+  let sumB = 0
+  let wB = 0
+  let maxVar = 0
+  let threshold = 128
+  for (let t = 0; t < 256; t++) {
+    wB += hist[t]
+    if (wB === 0) continue
+    const wF = total - wB
+    if (wF === 0) break
+    sumB += t * hist[t]
+    const mB = sumB / wB
+    const mF = (sum - sumB) / wF
+    const betweenVar = wB * wF * (mB - mF) * (mB - mF)
+    if (betweenVar > maxVar) {
+      maxVar = betweenVar
+      threshold = t
+    }
+  }
+  return threshold
+}
+
+// High-precision rasterization:
+// - 2× supersampling (render at 2x resolution, then downsample for sharper edges)
+// - 4×4 area-averaged sub-sampling per cell (vs 2×2 in BigWord)
+// - Otsu adaptive threshold (vs fixed 140 in BigWord)
+// - User-controllable grid density multiplier
 function rasterizeTargetToCellGrid(
   target: string,
   fontStack: string,
   targetFontSize: number,
   charAspect: number,
+  densityMultiplier: number,
 ): { grid: boolean[][]; cols: number; rows: number } | null {
   if (!target || target.trim() === "") return null
 
-  const canvas = document.createElement("canvas")
-  const ctx = canvas.getContext("2d")
-  if (!ctx) return null
-
-  const baseFont = Math.max(40, targetFontSize)
+  // --- Phase 1: Render at 2× resolution for supersampling ---
+  const SS = 2 // supersampling factor
+  const baseFont = Math.max(40, targetFontSize) * SS
   const font = `900 ${baseFont}px ${fontStack}`
-  ctx.font = font
+
+  const probeCanvas = document.createElement("canvas")
+  const probeCtx = probeCanvas.getContext("2d")
+  if (!probeCtx) return null
+  probeCtx.font = font
 
   const lines = target.split("\n")
   const lineH = baseFont * 1.35
   const padding = Math.round(baseFont * 0.35)
 
-  // Measure actual ink bounds (ascent/descent) to prevent glyph clipping
   let maxW = 0
   let maxAscent = 0
   let maxDescent = 0
   for (const l of lines) {
-    const m = ctx.measureText(l || " ")
+    const m = probeCtx.measureText(l || " ")
     maxW = Math.max(maxW, m.width)
     if (m.actualBoundingBoxAscent) maxAscent = Math.max(maxAscent, m.actualBoundingBoxAscent)
     if (m.actualBoundingBoxDescent) maxDescent = Math.max(maxDescent, m.actualBoundingBoxDescent)
   }
-  // Fallbacks for browsers without ink-bound support
   if (maxAscent === 0) maxAscent = baseFont * 0.85
   if (maxDescent === 0) maxDescent = baseFont * 0.25
 
-  canvas.width = Math.max(1, Math.ceil(maxW + padding * 2))
-  canvas.height = Math.max(1, Math.ceil(maxAscent + maxDescent + (lines.length - 1) * lineH + padding * 2))
+  probeCanvas.width = Math.max(1, Math.ceil(maxW + padding * 2))
+  probeCanvas.height = Math.max(1, Math.ceil(maxAscent + maxDescent + (lines.length - 1) * lineH + padding * 2))
 
-  // canvas resize resets context state — re-apply
-  ctx.fillStyle = "#ffffff"
-  ctx.fillRect(0, 0, canvas.width, canvas.height)
-  ctx.fillStyle = "#000000"
-  ctx.font = font
-  ctx.textBaseline = "alphabetic"
-  ctx.textAlign = "left"
-  lines.forEach((l, i) => ctx.fillText(l, padding, padding + maxAscent + i * lineH))
+  probeCtx.fillStyle = "#ffffff"
+  probeCtx.fillRect(0, 0, probeCanvas.width, probeCanvas.height)
+  probeCtx.fillStyle = "#000000"
+  probeCtx.font = font
+  probeCtx.textBaseline = "alphabetic"
+  probeCtx.textAlign = "left"
+  lines.forEach((l, i) => probeCtx.fillText(l, padding, padding + maxAscent + i * lineH))
 
-  const img = ctx.getImageData(0, 0, canvas.width, canvas.height).data
+  const img = probeCtx.getImageData(0, 0, probeCanvas.width, probeCanvas.height).data
+  const imgW = probeCanvas.width
+  const imgH = probeCanvas.height
 
-  // cols derived from target font size (density redundancy)
-  const cols = Math.max(8, Math.round(baseFont * 0.375))
-  const cellW = canvas.width / cols
+  // --- Phase 2: Build brightness histogram for Otsu threshold ---
+  const hist = new Array(256).fill(0)
+  for (let i = 0; i < img.length; i += 4) {
+    const bright = Math.round((img[i] + img[i + 1] + img[i + 2]) / 3)
+    hist[bright]++
+  }
+  const totalPixels = img.length / 4
+  const adaptiveThreshold = otsuThreshold(hist, totalPixels)
+
+  // --- Phase 3: Cell grid with 4×4 sub-sampling ---
+  // Density: user-controlled multiplier on top of BigWord's base formula
+  const baseCols = Math.max(8, Math.round(targetFontSize * 0.375))
+  const cols = Math.max(8, Math.round(baseCols * densityMultiplier))
+  const cellW = imgW / cols
   const cellH = cellW * charAspect
-  const rows = Math.ceil(canvas.height / cellH)
+  const rows = Math.ceil(imgH / cellH)
 
-  // 2×2 area-averaged sub-sampling; bright < 140 → cell is "dark" (part of char)
-  const SUB = 2
+  const SUB = 4 // 4×4 sub-sampling (vs 2×2 in BigWord)
   const grid: boolean[][] = []
   for (let r = 0; r < rows; r++) {
     const row: boolean[] = []
@@ -248,15 +287,15 @@ function rasterizeTargetToCellGrid(
         for (let sx = 0; sx < SUB; sx++) {
           const x = Math.floor((c + (sx + 0.5) / SUB) * cellW)
           const y = Math.floor((r + (sy + 0.5) / SUB) * cellH)
-          if (x >= 0 && x < canvas.width && y >= 0 && y < canvas.height) {
-            const p = (y * canvas.width + x) * 4
+          if (x >= 0 && x < imgW && y >= 0 && y < imgH) {
+            const p = (y * imgW + x) * 4
             brightSum += (img[p] + img[p + 1] + img[p + 2]) / 3
             sampleCount++
           }
         }
       }
       const bright = sampleCount > 0 ? brightSum / sampleCount : 255
-      row.push(bright < 140)
+      row.push(bright < adaptiveThreshold)
     }
     grid.push(row)
   }
@@ -309,10 +348,10 @@ function renderPixelArt(
     ctx.clearRect(0, 0, outputW, outputH)
   }
 
-  // Text style
+  // Text style — use center alignment for precise per-cell centering
   ctx.font = `700 ${fontSize}px ${sourceFontStack}`
-  ctx.textBaseline = "top"
-  ctx.textAlign = "left"
+  ctx.textBaseline = "middle"
+  ctx.textAlign = "center"
   ctx.fillStyle = textColor
 
   // CJK mode → convert chars to fullwidth for equal width
@@ -359,8 +398,8 @@ function renderPixelArt(
             if (!isSpace(ch)) {
               ctx.fillText(
                 ch,
-                padding + darkCols[darkPtr] * charW + offsetX,
-                padding + r * lineH + offsetY,
+                padding + darkCols[darkPtr] * charW + charW / 2 + offsetX,
+                padding + r * lineH + lineH / 2 + offsetY,
               )
             }
             darkPtr++
@@ -374,8 +413,8 @@ function renderPixelArt(
             if (!isSpace(ch)) {
               ctx.fillText(
                 ch,
-                padding + darkCols[darkPtr] * charW + offsetX,
-                padding + r * lineH + offsetY,
+                padding + darkCols[darkPtr] * charW + charW / 2 + offsetX,
+                padding + r * lineH + lineH / 2 + offsetY,
               )
             }
             darkPtr++
@@ -402,8 +441,8 @@ function renderPixelArt(
         if (isSpace(ch)) continue // don't draw spaces
         ctx.fillText(
           ch,
-          padding + c * charW + offsetX,
-          padding + r * lineH + offsetY,
+          padding + c * charW + charW / 2 + offsetX,
+          padding + r * lineH + lineH / 2 + offsetY,
         )
       }
     }
@@ -629,6 +668,7 @@ export default function ImagePage() {
   const [target, setTarget] = useState("赖疙宝")
   const [cellSize, setCellSize] = useState(12)
   const [targetFontSize, setTargetFontSize] = useState(320)
+  const [gridDensity, setGridDensity] = useState(1.5)
   const [targetFontId, setTargetFontId] = useState("yahei")
   const [sourceFontId, setSourceFontId] = useState("yahei")
   const [textColor, setTextColor] = useState("#818cf8")
@@ -695,7 +735,7 @@ export default function ImagePage() {
     if (!source || !target.trim()) return null
 
     const metrics = measureCellMetrics(sourceFont.stack, hasCJK)
-    const cellGrid = rasterizeTargetToCellGrid(target, targetFont.stack, targetFontSize, metrics.charAspect)
+    const cellGrid = rasterizeTargetToCellGrid(target, targetFont.stack, targetFontSize, metrics.charAspect, gridDensity)
     if (!cellGrid) return null
 
     const canvas = renderPixelArt(cellGrid, source, sourceFont.stack, metrics.charAspect, cellSize, {
@@ -708,7 +748,7 @@ export default function ImagePage() {
     })
 
     return canvas
-  }, [source, target, cellSize, targetFontSize, targetFont.stack, sourceFont.stack, textColor, bgColor, offsetX, offsetY, preventTruncation, hasCJK])
+  }, [source, target, cellSize, targetFontSize, gridDensity, targetFont.stack, sourceFont.stack, textColor, bgColor, offsetX, offsetY, preventTruncation, hasCJK])
 
   useEffect(() => {
     const canvas = renderPixelArtToCanvas()
@@ -876,6 +916,7 @@ export default function ImagePage() {
     setTarget("赖疙宝")
     setCellSize(12)
     setTargetFontSize(320)
+    setGridDensity(1.5)
     setTargetFontId("yahei")
     setSourceFontId("yahei")
     setTextColor("#818cf8")
@@ -1079,6 +1120,22 @@ export default function ImagePage() {
                     onChange={(e) => setTargetFontSize(Number(e.target.value))}
                     className="tool-slider"
                   />
+                </div>
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs text-slate-500 font-medium">网格密度</label>
+                    <span className="stat-chip">{gridDensity.toFixed(1)}x</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0.5}
+                    max={4}
+                    step={0.1}
+                    value={gridDensity}
+                    onChange={(e) => setGridDensity(Number(e.target.value))}
+                    className="tool-slider"
+                  />
+                  <p className="text-[10px] text-slate-400">越高则撇捺细节越精细</p>
                 </div>
               </CardContent>
             </Card>
