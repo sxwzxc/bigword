@@ -253,9 +253,9 @@ function rasterizeTargetToCellGrid(
           }
         }
       }
-      // A cell is "dark" (part of the character) if average brightness is below threshold
-      const bright = sampleCount > 0 ? brightSum / sampleCount : 255
-      row.push(bright < threshold)
+      // Text is white on black background, so a cell is "on" (part of the character) if brightness is ABOVE threshold
+      const bright = sampleCount > 0 ? brightSum / sampleCount : 0
+      row.push(bright > threshold)
     }
     grid.push(row)
   }
