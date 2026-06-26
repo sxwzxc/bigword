@@ -22,7 +22,9 @@ import {
   ScanLine,
   ChevronDown,
   X,
+  PenTool,
 } from "lucide-react"
+import Link from "next/link"
 
 /* ============================================================
    Font definitions
@@ -216,21 +218,37 @@ function generateBigWord(
   ctx.font = fontStack
 
   const lines = tgt.split("\n")
-  const lineH = baseFont * 1.2
-  const padding = Math.round(baseFont * 0.2)
+  const lineH = baseFont * 1.35
+  const padding = Math.round(baseFont * 0.35)
+
+  // Measure actual ink bounds (ascent/descent) to prevent glyph clipping.
+  // actualBoundingBoxAscent/Descent reflect the real glyph extent — far
+  // more accurate than the em-box estimate, especially for 900-weight CJK
+  // glyphs whose ascender/descender exceed the font-size.
   let maxW = 0
-  for (const l of lines) maxW = Math.max(maxW, ctx.measureText(l || " ").width)
+  let maxAscent = 0
+  let maxDescent = 0
+  for (const l of lines) {
+    const m = ctx.measureText(l || " ")
+    maxW = Math.max(maxW, m.width)
+    if (m.actualBoundingBoxAscent) maxAscent = Math.max(maxAscent, m.actualBoundingBoxAscent)
+    if (m.actualBoundingBoxDescent) maxDescent = Math.max(maxDescent, m.actualBoundingBoxDescent)
+  }
+  // Fallbacks for browsers without ink-bound support
+  if (maxAscent === 0) maxAscent = baseFont * 0.85
+  if (maxDescent === 0) maxDescent = baseFont * 0.25
 
   canvas.width = Math.max(1, Math.ceil(maxW + padding * 2))
-  canvas.height = Math.max(1, Math.ceil(lineH * lines.length + padding * 2))
+  canvas.height = Math.max(1, Math.ceil(maxAscent + maxDescent + (lines.length - 1) * lineH + padding * 2))
 
+  // canvas resize resets context state — re-apply
   ctx.fillStyle = "#ffffff"
   ctx.fillRect(0, 0, canvas.width, canvas.height)
   ctx.fillStyle = "#000000"
   ctx.font = fontStack
-  ctx.textBaseline = "middle"
+  ctx.textBaseline = "alphabetic"
   ctx.textAlign = "left"
-  lines.forEach((l, i) => ctx.fillText(l, padding, padding + (i + 0.5) * lineH))
+  lines.forEach((l, i) => ctx.fillText(l, padding, padding + maxAscent + i * lineH))
 
   const img = ctx.getImageData(0, 0, canvas.width, canvas.height).data
 
@@ -241,18 +259,30 @@ function generateBigWord(
   const cellH = cellW * metrics.charAspect
   const rows = Math.ceil(canvas.height / cellH)
 
-  // Step 1: sample all pixels into a dark/light grid
+  // Step 1: sample all pixels into a dark/light grid.
+  // Use 2×2 area-averaged sub-sampling instead of single-point center
+  // sampling. Single-point sampling misses thin strokes (diagonals,
+  // 撇捺) that pass through a cell but not its exact center, causing
+  // broken diagonals. Area averaging detects any stroke touching the cell.
+  const SUB = 2
   const darkGrid: boolean[][] = []
   for (let r = 0; r < rows; r++) {
     const row: boolean[] = []
     for (let c = 0; c < cols; c++) {
-      const x = Math.floor((c + 0.5) * cellW)
-      const y = Math.floor((r + 0.5) * cellH)
-      let bright = 255
-      if (x >= 0 && x < canvas.width && y >= 0 && y < canvas.height) {
-        const p = (y * canvas.width + x) * 4
-        bright = (img[p] + img[p + 1] + img[p + 2]) / 3
+      let brightSum = 0
+      let sampleCount = 0
+      for (let sy = 0; sy < SUB; sy++) {
+        for (let sx = 0; sx < SUB; sx++) {
+          const x = Math.floor((c + (sx + 0.5) / SUB) * cellW)
+          const y = Math.floor((r + (sy + 0.5) / SUB) * cellH)
+          if (x >= 0 && x < canvas.width && y >= 0 && y < canvas.height) {
+            const p = (y * canvas.width + x) * 4
+            brightSum += (img[p] + img[p + 1] + img[p + 2]) / 3
+            sampleCount++
+          }
+        }
       }
+      const bright = sampleCount > 0 ? brightSum / sampleCount : 255
       row.push(bright < 140)
     }
     darkGrid.push(row)
@@ -260,38 +290,23 @@ function generateBigWord(
 
   // 准备素材字符：CJK 模式下转换为全角，保证每个字符等宽
   const convertChar = (ch: string): string => hasCJK ? toFullwidth(ch) : ch
-  const spaceChar = hasCJK ? "\u3000" : " "
 
   const out: string[] = []
 
   if (preventTruncation) {
     // 防截断模式：以空格分割素材为"词"
     // 规则：
-    //   1. 每个词必须完整输出，不可截断
-    //   2. 词与词之间至少 1 个空格（循环边界也补充空格）
-    //   3. 空格个数可根据渲染需要调整（行尾填空格对齐）
+    //   1. 每个词必须完整输出，不可在词中间截断换行
+    //   2. 词与词之间直接连续填充，不额外消耗暗像素位置作空格
+    //   3. 若当前行剩余暗像素不足以放下下一个完整词，则换行
+    //   4. 若词比整行暗像素还长，则跨行续接
     const words = source.split(/\s+/).filter((w) => w.length > 0)
     if (words.length === 0) return ""
 
-    // 将每个词转为字符数组（CJK 模式下转全角）
     const wordChars: string[][] = words.map((w) => [...w].map(convertChar))
-    const spaceToken = spaceChar // 词间分隔符（1 个空格单元）
 
-    // 令牌流：word1, space, word2, space, ..., wordN, space, word1, space, ...
-    // 注意：最后一个词后面也有 space，保证循环边界有空格分隔
-    interface Token { chars: string[]; isSpace: boolean }
-    const buildTokens = (): Token[] => {
-      const ts: Token[] = []
-      for (let i = 0; i < wordChars.length; i++) {
-        ts.push({ chars: wordChars[i], isSpace: false })
-        ts.push({ chars: [spaceToken], isSpace: true })
-      }
-      return ts
-    }
-    const tokens = buildTokens()
-
-    let tokenIdx = 0
-    let charInToken = 0
+    let wordIdx = 0
+    let charInWord = 0
 
     for (let r = 0; r < rows; r++) {
       const darkCols: number[] = []
@@ -303,33 +318,33 @@ function generateBigWord(
       let darkPtr = 0
 
       while (darkPtr < darkCols.length) {
-        if (tokenIdx >= tokens.length) {
-          tokenIdx = 0
-          charInToken = 0
+        if (wordIdx >= wordChars.length) {
+          wordIdx = 0
+          charInWord = 0
         }
 
-        const token = tokens[tokenIdx]
-        const remainingToken = token.chars.length - charInToken
+        const word = wordChars[wordIdx]
+        const remainingInWord = word.length - charInWord
         const remainingDark = darkCols.length - darkPtr
 
-        if (remainingToken <= remainingDark) {
-          // 令牌完整放入当前行剩余暗像素
-          for (let i = 0; i < remainingToken; i++) {
-            rowChars[darkCols[darkPtr]] = token.chars[charInToken + i]
+        if (remainingInWord <= remainingDark) {
+          // 当前词可以完整放入剩余暗像素
+          for (let i = 0; i < remainingInWord; i++) {
+            rowChars[darkCols[darkPtr]] = word[charInWord + i]
             darkPtr++
           }
-          tokenIdx++
-          charInToken = 0
-        } else if (remainingToken > darkCols.length) {
-          // 令牌比整行暗像素还长——强制跨行续接
+          wordIdx++
+          charInWord = 0
+        } else if (remainingInWord > darkCols.length) {
+          // 词比整行暗像素还长——跨行续接
           for (let i = 0; i < remainingDark; i++) {
-            rowChars[darkCols[darkPtr]] = token.chars[charInToken + i]
+            rowChars[darkCols[darkPtr]] = word[charInWord + i]
             darkPtr++
           }
-          charInToken += remainingDark
+          charInWord += remainingDark
           break
         } else {
-          // 令牌能放入完整行但放不进剩余空间——填充空格，令牌移至下一行
+          // 词能放入完整行但放不进剩余空间——换行
           break
         }
       }
@@ -817,14 +832,27 @@ export default function Home() {
       {/* Header */}
       <header className="header-border sticky top-0 z-30">
         <div className="max-w-7xl mx-auto px-2 sm:px-6 py-2 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-indigo-500 to-violet-500 flex items-center justify-center shadow-md shadow-indigo-500/30">
-              <Type className="w-4 h-4 text-white" />
+          <div className="flex items-center gap-4">
+            <div className="flex items-center gap-2">
+              <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-indigo-500 to-violet-500 flex items-center justify-center shadow-md shadow-indigo-500/30">
+                <Type className="w-4 h-4 text-white" />
+              </div>
+              <div>
+                <span className="font-extrabold text-base tracking-tight text-slate-900">BigWord</span>
+                <span className="text-xs text-slate-400 ml-1.5 hidden sm:inline">字符画</span>
+              </div>
             </div>
-            <div>
-              <span className="font-extrabold text-base tracking-tight text-slate-900">BigWord</span>
-              <span className="text-xs text-slate-400 ml-1.5 hidden sm:inline">字符画</span>
-            </div>
+            <div className="w-px h-5 bg-slate-200" />
+            <Link
+              href="/image"
+              className="flex items-center gap-2 hover:opacity-80 transition-opacity"
+            >
+              <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-pink-500 to-rose-500 flex items-center justify-center shadow-md shadow-pink-500/30">
+                <PenTool className="w-4 h-4 text-white" />
+              </div>
+              <span className="font-extrabold text-base tracking-tight text-slate-900">ImageForge</span>
+              <span className="text-xs text-slate-400 ml-1 hidden sm:inline">像素画板</span>
+            </Link>
           </div>
           <div className="flex items-center gap-3">
             <span className="text-xs text-slate-400 hidden sm:inline">
@@ -1223,6 +1251,26 @@ export default function Home() {
             <p className="text-slate-500 text-sm leading-relaxed">
               EdgeOne 边缘函数纯 Python 生成，就近节点，零依赖部署，可作 API 调用
             </p>
+          </div>
+        </div>
+
+        {/* ImageForge CTA */}
+        <div className="mt-10 text-center animate-fade-in-up animation-delay-300">
+          <div className="inline-flex flex-col items-center gap-4 p-8 rounded-2xl bg-gradient-to-br from-pink-50 to-rose-50 border border-pink-200">
+            <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-pink-500 to-rose-500 flex items-center justify-center shadow-lg shadow-pink-500/30">
+              <PenTool className="w-7 h-7 text-white" />
+            </div>
+            <div>
+              <h3 className="text-xl font-bold text-slate-800 mb-1">想要更精细的控制？</h3>
+              <p className="text-slate-500 text-sm">试试 ImageForge 像素画板 — 文字生成图片，像素级微调，导出完美作品</p>
+            </div>
+            <Link
+              href="/image"
+              className="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-gradient-to-r from-pink-500 to-rose-500 text-white font-semibold hover:from-pink-600 hover:to-rose-600 transition-all shadow-lg shadow-pink-500/25 hover:shadow-pink-500/40 hover:scale-105"
+            >
+              <PenTool className="w-4 h-4" />
+              打开 ImageForge
+            </Link>
           </div>
         </div>
       </main>
