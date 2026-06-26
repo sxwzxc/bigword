@@ -20,9 +20,11 @@ import {
   Pencil,
   Eraser,
   Pipette,
-  Grid3x3,
   Maximize2,
   Hand,
+  Sparkles,
+  Shuffle,
+  Hash,
 } from "lucide-react"
 import Link from "next/link"
 
@@ -97,6 +99,38 @@ const BG_COLORS = [
 ]
 
 type Tool = "select" | "pan" | "pencil" | "eraser" | "eyedropper"
+
+function isCJKCodePoint(code: number): boolean {
+  return (
+    (code >= 0x1100 && code <= 0x115f) ||
+    (code >= 0x2e80 && code <= 0x303e) ||
+    (code >= 0x3040 && code <= 0x33bf) ||
+    (code >= 0x3400 && code <= 0x4dbf) ||
+    (code >= 0x4e00 && code <= 0xa4cf) ||
+    (code >= 0xac00 && code <= 0xd7af) ||
+    (code >= 0xf900 && code <= 0xfaff) ||
+    (code >= 0xfe30 && code <= 0xfe4f) ||
+    (code >= 0xff00 && code <= 0xffef)
+  )
+}
+
+function containsCJK(text: string): boolean {
+  for (const ch of text) {
+    const code = ch.codePointAt(0)
+    if (code !== undefined && isCJKCodePoint(code)) return true
+  }
+  return false
+}
+
+function toFullwidth(ch: string): string {
+  const code = ch.codePointAt(0)
+  if (code === undefined) return ch
+  if (code === 0x20) return "\u3000"
+  if (code >= 0x21 && code <= 0x7e) {
+    return String.fromCodePoint(code + 0xfee0)
+  }
+  return ch
+}
 
 interface FontPickerProps {
   accent: string
@@ -311,20 +345,15 @@ function FontPicker({
 }
 
 export default function ImagePage() {
-  const [text, setText] = useState("Hello")
-  const [fontSize, setFontSize] = useState(120)
-  const [fontId, setFontId] = useState("yahei")
-  const [textColor, setTextColor] = useState("#ffffff")
-  const [bgColor, setBgColor] = useState("#000000")
-  const [isBold, setIsBold] = useState(true)
-  const [letterSpacing, setLetterSpacing] = useState(0)
-  const [lineHeight, setLineHeight] = useState(1.2)
-  const [textAlign, setTextAlign] = useState<"left" | "center" | "right">("center")
-  const [paddingX, setPaddingX] = useState(40)
-  const [paddingY, setPaddingY] = useState(40)
-  const [canvasWidth, setCanvasWidth] = useState(800)
-  const [canvasHeight, setCanvasHeight] = useState(400)
-  const [autoSize, setAutoSize] = useState(true)
+  const [source, setSource] = useState("鳖鳖")
+  const [target, setTarget] = useState("赖疙宝")
+  const [fontSize, setFontSize] = useState(10)
+  const [targetFontSize, setTargetFontSize] = useState(320)
+  const [targetFontId, setTargetFontId] = useState("yahei")
+  const [sourceFontId, setSourceFontId] = useState("yahei")
+  const [textColor, setTextColor] = useState("#818cf8")
+  const [bgColor, setBgColor] = useState("#0f172a")
+  const [preventTruncation, setPreventTruncation] = useState(false)
 
   const [zoom, setZoom] = useState(1)
   const [panOffset, setPanOffset] = useState({ x: 0, y: 0 })
@@ -346,7 +375,10 @@ export default function ImagePage() {
   const renderCanvasRef = useRef<HTMLCanvasElement | null>(null)
 
   const allFonts = useMemo(() => [...BUILTIN_FONTS, ...systemFonts], [systemFonts])
-  const font = allFonts.find((f) => f.id === fontId) ?? BUILTIN_FONTS[0]
+  const targetFont = allFonts.find((f) => f.id === targetFontId) ?? BUILTIN_FONTS[0]
+  const sourceFont = allFonts.find((f) => f.id === sourceFontId) ?? BUILTIN_FONTS[0]
+
+  const hasCJK = useMemo(() => containsCJK(source), [source])
 
   const scanSystemFonts = useCallback(async () => {
     setScanning(true)
@@ -377,89 +409,219 @@ export default function ImagePage() {
     }
   }, [])
 
-  const renderTextToCanvas = useCallback(() => {
+  const renderBigWordToCanvas = useCallback(() => {
+    if (!source || !target.trim()) return null
+
     const offscreen = document.createElement("canvas")
     const ctx = offscreen.getContext("2d")
     if (!ctx) return null
 
-    const weight = isBold ? "900" : "400"
-    const fontStr = `${weight} ${fontSize}px ${font.stack}`
-    ctx.font = fontStr
+    const baseFont = Math.max(40, targetFontSize)
+    const fontStack = `900 ${baseFont}px ${targetFont.stack}`
+    ctx.font = fontStack
+
+    const lines = target.split("\n")
+    const lineH = baseFont * 1.35
+    const padding = Math.round(baseFont * 0.35)
+
+    let maxW = 0
+    let maxAscent = 0
+    let maxDescent = 0
+    for (const l of lines) {
+      const m = ctx.measureText(l || " ")
+      maxW = Math.max(maxW, m.width)
+      if (m.actualBoundingBoxAscent) maxAscent = Math.max(maxAscent, m.actualBoundingBoxAscent)
+      if (m.actualBoundingBoxDescent) maxDescent = Math.max(maxDescent, m.actualBoundingBoxDescent)
+    }
+    if (maxAscent === 0) maxAscent = baseFont * 0.85
+    if (maxDescent === 0) maxDescent = baseFont * 0.25
+
+    offscreen.width = Math.max(1, Math.ceil(maxW + padding * 2))
+    offscreen.height = Math.max(1, Math.ceil(maxAscent + maxDescent + (lines.length - 1) * lineH + padding * 2))
+
+    ctx.fillStyle = "#ffffff"
+    ctx.fillRect(0, 0, offscreen.width, offscreen.height)
+    ctx.fillStyle = "#000000"
+    ctx.font = fontStack
     ctx.textBaseline = "alphabetic"
-    ctx.letterSpacing = `${letterSpacing}px`
+    ctx.textAlign = "left"
+    lines.forEach((l, i) => ctx.fillText(l, padding, padding + maxAscent + i * lineH))
 
-    const lines = text.split("\n")
-    const lineH = fontSize * lineHeight
+    const img = ctx.getImageData(0, 0, offscreen.width, offscreen.height).data
 
-    let maxWidth = 0
-    let totalAscent = 0
-    let totalDescent = 0
-    const lineMetrics: { ascent: number; descent: number; width: number }[] = []
+    const cols = Math.max(8, Math.round(baseFont * 0.375))
+    const cellW = offscreen.width / cols
 
-    for (const line of lines) {
-      const m = ctx.measureText(line || " ")
-      const ascent = m.actualBoundingBoxAscent || fontSize * 0.85
-      const descent = m.actualBoundingBoxDescent || fontSize * 0.25
-      lineMetrics.push({ ascent, descent, width: m.width })
-      maxWidth = Math.max(maxWidth, m.width)
-      totalAscent = Math.max(totalAscent, ascent)
-      totalDescent = Math.max(totalDescent, descent)
-    }
+    const measureProbe = document.createElement("span")
+    measureProbe.style.cssText =
+      `font-family:${sourceFont.stack};font-size:100px;font-weight:700;` +
+      `position:absolute;visibility:hidden;white-space:pre;letter-spacing:0;line-height:1;`
+    document.body.appendChild(measureProbe)
 
-    let w: number
-    let h: number
-    if (autoSize) {
-      w = Math.ceil(maxWidth + paddingX * 2)
-      h = Math.ceil(totalAscent + totalDescent + (lines.length - 1) * lineH + paddingY * 2)
-      w = Math.max(w, 1)
-      h = Math.max(h, 1)
+    let charAspect: number
+    let emptyChar: string
+    if (hasCJK) {
+      measureProbe.textContent = "\u5b57"
+      const cjkW = measureProbe.getBoundingClientRect().width
+      document.body.removeChild(measureProbe)
+      if (!cjkW || !isFinite(cjkW)) {
+        charAspect = 1.0
+        emptyChar = "\u3000"
+      } else {
+        charAspect = 100 / cjkW
+        emptyChar = "\u3000"
+      }
     } else {
-      w = canvasWidth
-      h = canvasHeight
+      measureProbe.textContent = "M"
+      const asciiW = measureProbe.getBoundingClientRect().width
+      document.body.removeChild(measureProbe)
+      if (!asciiW || !isFinite(asciiW)) {
+        charAspect = 1.0
+        emptyChar = " "
+      } else {
+        charAspect = 100 / asciiW
+        emptyChar = " "
+      }
     }
 
-    offscreen.width = w
-    offscreen.height = h
+    const cellH = cellW * charAspect
+    const rows = Math.ceil(offscreen.height / cellH)
+
+    const SUB = 2
+    const darkGrid: boolean[][] = []
+    for (let r = 0; r < rows; r++) {
+      const row: boolean[] = []
+      for (let c = 0; c < cols; c++) {
+        let brightSum = 0
+        let sampleCount = 0
+        for (let sy = 0; sy < SUB; sy++) {
+          for (let sx = 0; sx < SUB; sx++) {
+            const x = Math.floor((c + (sx + 0.5) / SUB) * cellW)
+            const y = Math.floor((r + (sy + 0.5) / SUB) * cellH)
+            if (x >= 0 && x < offscreen.width && y >= 0 && y < offscreen.height) {
+              const p = (y * offscreen.width + x) * 4
+              brightSum += (img[p] + img[p + 1] + img[p + 2]) / 3
+              sampleCount++
+            }
+          }
+        }
+        const bright = sampleCount > 0 ? brightSum / sampleCount : 255
+        row.push(bright < 140)
+      }
+      darkGrid.push(row)
+    }
+
+    const convertChar = (ch: string): string => hasCJK ? toFullwidth(ch) : ch
+
+    const charLines: string[][] = []
+
+    if (preventTruncation) {
+      const words = source.split(/\s+/).filter((w) => w.length > 0)
+      if (words.length === 0) return null
+
+      const wordChars: string[][] = words.map((w) => [...w].map(convertChar))
+
+      let wordIdx = 0
+      let charInWord = 0
+
+      for (let r = 0; r < rows; r++) {
+        const darkCols: number[] = []
+        for (let c = 0; c < cols; c++) {
+          if (darkGrid[r][c]) darkCols.push(c)
+        }
+
+        const rowChars: string[] = new Array(cols).fill(emptyChar)
+        let darkPtr = 0
+
+        while (darkPtr < darkCols.length) {
+          if (wordIdx >= wordChars.length) {
+            wordIdx = 0
+            charInWord = 0
+          }
+
+          const word = wordChars[wordIdx]
+          const remainingInWord = word.length - charInWord
+          const remainingDark = darkCols.length - darkPtr
+
+          if (remainingInWord <= remainingDark) {
+            for (let i = 0; i < remainingInWord; i++) {
+              rowChars[darkCols[darkPtr]] = word[charInWord + i]
+              darkPtr++
+            }
+            wordIdx++
+            charInWord = 0
+          } else if (remainingInWord > darkCols.length) {
+            for (let i = 0; i < remainingDark; i++) {
+              rowChars[darkCols[darkPtr]] = word[charInWord + i]
+              darkPtr++
+            }
+            charInWord += remainingDark
+            break
+          } else {
+            break
+          }
+        }
+
+        charLines.push(rowChars)
+      }
+    } else {
+      const src = [...source].map(convertChar)
+      let idx = 0
+      for (let r = 0; r < rows; r++) {
+        const rowChars: string[] = []
+        for (let c = 0; c < cols; c++) {
+          if (darkGrid[r][c]) {
+            rowChars.push(src[idx % src.length])
+            idx++
+          } else {
+            rowChars.push(emptyChar)
+          }
+        }
+        charLines.push(rowChars)
+      }
+    }
+
+    const charH = fontSize
+    const charW = hasCJK ? charH : charH * 0.6
+    const lineSpacing = fontSize * 1.0
+
+    const outputWidth = Math.ceil(cols * charW + 48)
+    const outputHeight = Math.ceil(rows * lineSpacing + 48)
+
+    const outputCanvas = document.createElement("canvas")
+    outputCanvas.width = outputWidth
+    outputCanvas.height = outputHeight
+    const octx = outputCanvas.getContext("2d")
+    if (!octx) return null
 
     if (bgColor !== "transparent") {
-      ctx.fillStyle = bgColor
-      ctx.fillRect(0, 0, w, h)
+      octx.fillStyle = bgColor
+      octx.fillRect(0, 0, outputWidth, outputHeight)
     } else {
-      ctx.clearRect(0, 0, w, h)
+      octx.clearRect(0, 0, outputWidth, outputHeight)
     }
 
-    ctx.font = fontStr
-    ctx.fillStyle = textColor
-    ctx.textBaseline = "alphabetic"
-    ctx.letterSpacing = `${letterSpacing}px`
+    octx.fillStyle = textColor
+    octx.font = `700 ${fontSize}px ${sourceFont.stack}`
+    octx.textBaseline = "top"
+    octx.textAlign = "left"
 
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i]
-      const lm = lineMetrics[i]
-      let x: number
-      if (textAlign === "left") {
-        x = paddingX
-      } else if (textAlign === "right") {
-        x = w - paddingX - lm.width
-      } else {
-        x = (w - lm.width) / 2
+    for (let r = 0; r < charLines.length; r++) {
+      const chars = charLines[r]
+      for (let c = 0; c < chars.length; c++) {
+        octx.fillText(chars[c], 24 + c * charW, 24 + r * lineSpacing)
       }
-      const y = paddingY + totalAscent + i * lineH
-      ctx.fillText(line, x, y)
     }
 
-    return offscreen
-  }, [text, fontSize, font.stack, isBold, letterSpacing, lineHeight, textAlign, paddingX, paddingY, autoSize, canvasWidth, canvasHeight, textColor, bgColor])
+    return outputCanvas
+  }, [source, target, targetFontSize, targetFont.stack, sourceFont.stack, fontSize, textColor, bgColor, preventTruncation, hasCJK])
 
   useEffect(() => {
-    const canvas = renderTextToCanvas()
+    const canvas = renderBigWordToCanvas()
     renderCanvasRef.current = canvas
 
     const displayCanvas = canvasRef.current
     if (!displayCanvas || !canvas) return
-
-    const container = containerRef.current
-    if (!container) return
 
     displayCanvas.width = canvas.width
     displayCanvas.height = canvas.height
@@ -476,7 +638,7 @@ export default function ImagePage() {
         octx.clearRect(0, 0, overlay.width, overlay.height)
       }
     }
-  }, [renderTextToCanvas])
+  }, [renderBigWordToCanvas])
 
   const getCanvasCoords = useCallback((e: React.MouseEvent) => {
     const overlay = overlayCanvasRef.current
@@ -587,7 +749,7 @@ export default function ImagePage() {
       const url = URL.createObjectURL(blob)
       const a = document.createElement("a")
       a.href = url
-      a.download = `bigword-image-${text.slice(0, 10) || "output"}.png`
+      a.download = `bigword-image-${target.slice(0, 10) || "output"}.png`
       a.click()
       URL.revokeObjectURL(url)
     }, "image/png")
@@ -609,19 +771,22 @@ export default function ImagePage() {
     dctx.drawImage(base, 0, 0)
   }
 
+  const handleShuffle = () => {
+    setSource((s) =>
+      [...s].map((c) => ({ c, k: Math.random() })).sort((a, b) => a.k - b.k).map((x) => x.c).join(""),
+    )
+  }
+
   const handleReset = () => {
-    setText("Hello")
-    setFontSize(120)
-    setFontId("yahei")
-    setTextColor("#ffffff")
-    setBgColor("#000000")
-    setIsBold(true)
-    setLetterSpacing(0)
-    setLineHeight(1.2)
-    setTextAlign("center")
-    setPaddingX(40)
-    setPaddingY(40)
-    setAutoSize(true)
+    setSource("鳖鳖")
+    setTarget("赖疙宝")
+    setFontSize(10)
+    setTargetFontSize(320)
+    setTargetFontId("yahei")
+    setSourceFontId("yahei")
+    setTextColor("#818cf8")
+    setBgColor("#0f172a")
+    setPreventTruncation(false)
     setZoom(1)
     setPanOffset({ x: 0, y: 0 })
     handleClearOverlay()
@@ -634,7 +799,7 @@ export default function ImagePage() {
     { tool: "eyedropper", icon: <Pipette className="w-4 h-4" />, label: "取色" },
   ]
 
-  const cursorStyle = activeTool === "pan" ? (isPanning ? "grabbing" : "grab") : activeTool === "eyedropper" ? "crosshair" : "crosshair"
+  const cursorStyle = activeTool === "pan" ? (isPanning ? "grabbing" : "grab") : "crosshair"
 
   return (
     <div className="min-h-screen bg-slate-100 text-slate-900 relative">
@@ -691,7 +856,7 @@ export default function ImagePage() {
               像素画板
             </span>
           </h1>
-          <p className="text-slate-500 mt-2 text-sm">文字生成图片，像素级微调，导出完美作品</p>
+          <p className="text-slate-500 mt-2 text-sm">用小字符画大字符，直接输出图片，像素级微调</p>
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-[320px_1fr] gap-5">
@@ -699,39 +864,57 @@ export default function ImagePage() {
             <Card className="flat-card border-0 shadow-sm animate-fade-in-up animation-delay-100">
               <CardContent className="p-4 space-y-3">
                 <span className="label-pill" style={{ color: "#ec4899" }}>
-                  <Type className="w-3.5 h-3.5" />
-                  文本内容
+                  <Sparkles className="w-3.5 h-3.5" />
+                  素材文本
                 </span>
                 <textarea
                   className="tool-textarea"
-                  rows={4}
-                  value={text}
-                  onChange={(e) => setText(e.target.value)}
-                  placeholder="输入要渲染为图片的文本…"
+                  rows={3}
+                  value={source}
+                  onChange={(e) => setSource(e.target.value)}
+                  placeholder="作为字符来源的文本，例如：Hello"
                 />
+                <div className="flex items-center justify-between">
+                  <span className="stat-chip">
+                    <Hash className="w-3 h-3" />
+                    {[...source.replace(/\s+/g, "")].length}
+                  </span>
+                  <div className="flex items-center gap-2">
+                    {hasCJK && (
+                      <span className="stat-chip" style={{ background: "#fef3c7", border: "#fde68a", color: "#92400e" }}>
+                        CJK
+                      </span>
+                    )}
+                    <label className="flex items-center gap-1 cursor-pointer select-none text-xs text-slate-500">
+                      <input
+                        type="checkbox"
+                        checked={preventTruncation}
+                        onChange={(e) => setPreventTruncation(e.target.checked)}
+                        className="w-3.5 h-3.5 rounded border-slate-300 text-indigo-500 cursor-pointer accent-indigo-500"
+                      />
+                      防截断
+                    </label>
+                    <button
+                      onClick={handleShuffle}
+                      className="text-slate-400 hover:text-amber-500 transition-colors p-1.5 rounded-lg hover:bg-amber-50 cursor-pointer"
+                      title="打乱素材顺序"
+                    >
+                      <Shuffle className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
                 <div className="space-y-1.5">
-                  <label className="text-xs text-slate-500 font-medium">字体</label>
+                  <label className="text-xs text-slate-500 font-medium">素材字体</label>
                   <FontPicker
-                    accent="#ec4899"
+                    accent="#10b981"
                     fonts={allFonts}
-                    selectedId={fontId}
-                    onSelect={setFontId}
+                    selectedId={sourceFontId}
+                    onSelect={setSourceFontId}
                     systemFonts={systemFonts}
                     onScan={scanSystemFonts}
                     scanning={scanning}
                     scanError={scanError}
                   />
-                </div>
-                <div className="flex items-center gap-2">
-                  <label className="flex items-center gap-1.5 cursor-pointer select-none text-xs text-slate-500">
-                    <input
-                      type="checkbox"
-                      checked={isBold}
-                      onChange={(e) => setIsBold(e.target.checked)}
-                      className="w-3.5 h-3.5 rounded border-slate-300 text-indigo-500 cursor-pointer accent-indigo-500"
-                    />
-                    粗体
-                  </label>
                 </div>
               </CardContent>
             </Card>
@@ -739,18 +922,47 @@ export default function ImagePage() {
             <Card className="flat-card border-0 shadow-sm animate-fade-in-up animation-delay-200">
               <CardContent className="p-4 space-y-3">
                 <span className="label-pill" style={{ color: "#6366f1" }}>
+                  <Type className="w-3.5 h-3.5" />
+                  目标文本
+                </span>
+                <textarea
+                  className="tool-textarea"
+                  rows={3}
+                  value={target}
+                  onChange={(e) => setTarget(e.target.value)}
+                  placeholder="最终要呈现的内容，例如：HI"
+                />
+                <div className="space-y-1.5">
+                  <label className="text-xs text-slate-500 font-medium">目标字体</label>
+                  <FontPicker
+                    accent="#6366f1"
+                    fonts={allFonts}
+                    selectedId={targetFontId}
+                    onSelect={setTargetFontId}
+                    systemFonts={systemFonts}
+                    onScan={scanSystemFonts}
+                    scanning={scanning}
+                    scanError={scanError}
+                  />
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card className="flat-card border-0 shadow-sm animate-fade-in-up animation-delay-200">
+              <CardContent className="p-4 space-y-3">
+                <span className="label-pill" style={{ color: "#f59e0b" }}>
                   <Palette className="w-3.5 h-3.5" />
                   样式设置
                 </span>
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between">
-                    <label className="text-xs text-slate-500 font-medium">字号</label>
+                    <label className="text-xs text-slate-500 font-medium">小字字号</label>
                     <span className="stat-chip">{fontSize}px</span>
                   </div>
                   <input
                     type="range"
-                    min={12}
-                    max={500}
+                    min={4}
+                    max={24}
                     step={1}
                     value={fontSize}
                     onChange={(e) => setFontSize(Number(e.target.value))}
@@ -759,47 +971,18 @@ export default function ImagePage() {
                 </div>
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between">
-                    <label className="text-xs text-slate-500 font-medium">字间距</label>
-                    <span className="stat-chip">{letterSpacing}px</span>
+                    <label className="text-xs text-slate-500 font-medium">目标字号</label>
+                    <span className="stat-chip">{targetFontSize}px</span>
                   </div>
                   <input
                     type="range"
-                    min={-20}
-                    max={50}
-                    step={1}
-                    value={letterSpacing}
-                    onChange={(e) => setLetterSpacing(Number(e.target.value))}
+                    min={80}
+                    max={600}
+                    step={10}
+                    value={targetFontSize}
+                    onChange={(e) => setTargetFontSize(Number(e.target.value))}
                     className="tool-slider"
                   />
-                </div>
-                <div className="space-y-1.5">
-                  <div className="flex items-center justify-between">
-                    <label className="text-xs text-slate-500 font-medium">行高</label>
-                    <span className="stat-chip">{lineHeight.toFixed(1)}</span>
-                  </div>
-                  <input
-                    type="range"
-                    min={0.5}
-                    max={3}
-                    step={0.1}
-                    value={lineHeight}
-                    onChange={(e) => setLineHeight(Number(e.target.value))}
-                    className="tool-slider"
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <label className="text-xs text-slate-500 font-medium">对齐</label>
-                  <div className="flex gap-1">
-                    {(["left", "center", "right"] as const).map((a) => (
-                      <button
-                        key={a}
-                        onClick={() => setTextAlign(a)}
-                        className={`seg-btn flex-1 ${textAlign === a ? "seg-btn-active" : ""}`}
-                      >
-                        {a === "left" ? "左" : a === "center" ? "中" : "右"}
-                      </button>
-                    ))}
-                  </div>
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="text-xs text-slate-500 font-medium">文字颜色</span>
@@ -853,78 +1036,6 @@ export default function ImagePage() {
                         className="absolute inset-0 opacity-0 cursor-pointer"
                       />
                     </label>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-
-            <Card className="flat-card border-0 shadow-sm animate-fade-in-up animation-delay-300">
-              <CardContent className="p-4 space-y-3">
-                <div className="flex items-center justify-between">
-                  <span className="label-pill" style={{ color: "#f59e0b" }}>
-                    <Grid3x3 className="w-3.5 h-3.5" />
-                    画布尺寸
-                  </span>
-                  <label className="flex items-center gap-1 cursor-pointer select-none text-xs text-slate-500">
-                    <input
-                      type="checkbox"
-                      checked={autoSize}
-                      onChange={(e) => setAutoSize(e.target.checked)}
-                      className="w-3.5 h-3.5 rounded border-slate-300 text-indigo-500 cursor-pointer accent-indigo-500"
-                    />
-                    自动
-                  </label>
-                </div>
-                {!autoSize && (
-                  <div className="grid grid-cols-2 gap-2">
-                    <div className="space-y-1">
-                      <label className="text-xs text-slate-500">宽度</label>
-                      <input
-                        type="number"
-                        value={canvasWidth}
-                        onChange={(e) => setCanvasWidth(Math.max(1, Number(e.target.value)))}
-                        className="tool-textarea !p-2 !text-sm !rows-1"
-                        min={1}
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-xs text-slate-500">高度</label>
-                      <input
-                        type="number"
-                        value={canvasHeight}
-                        onChange={(e) => setCanvasHeight(Math.max(1, Number(e.target.value)))}
-                        className="tool-textarea !p-2 !text-sm !rows-1"
-                        min={1}
-                      />
-                    </div>
-                  </div>
-                )}
-                <div className="grid grid-cols-2 gap-2">
-                  <div className="space-y-1">
-                    <label className="text-xs text-slate-500">水平内边距</label>
-                    <input
-                      type="range"
-                      min={0}
-                      max={200}
-                      step={1}
-                      value={paddingX}
-                      onChange={(e) => setPaddingX(Number(e.target.value))}
-                      className="tool-slider"
-                    />
-                    <span className="text-[10px] text-slate-400">{paddingX}px</span>
-                  </div>
-                  <div className="space-y-1">
-                    <label className="text-xs text-slate-500">垂直内边距</label>
-                    <input
-                      type="range"
-                      min={0}
-                      max={200}
-                      step={1}
-                      value={paddingY}
-                      onChange={(e) => setPaddingY(Number(e.target.value))}
-                      className="tool-slider"
-                    />
-                    <span className="text-[10px] text-slate-400">{paddingY}px</span>
                   </div>
                 </div>
               </CardContent>
@@ -1112,14 +1223,9 @@ export default function ImagePage() {
                 </div>
 
                 <div className="mt-3 flex items-center justify-between text-xs text-slate-400">
-                  <div className="flex items-center gap-3">
-                    <span>滚轮缩放 · 拖拽平移</span>
-                    <span>当前工具: {toolItems.find(t => t.tool === activeTool)?.label}</span>
-                  </div>
+                  <span>滚轮缩放 · 拖拽平移 · 当前工具: {toolItems.find(t => t.tool === activeTool)?.label}</span>
                   {renderCanvasRef.current && (
-                    <span>
-                      偏移 ({panOffset.x}, {panOffset.y})
-                    </span>
+                    <span>偏移 ({panOffset.x}, {panOffset.y})</span>
                   )}
                 </div>
               </CardContent>
@@ -1130,9 +1236,9 @@ export default function ImagePage() {
                 <div className="w-10 h-10 mb-3 rounded-xl bg-pink-100 flex items-center justify-center">
                   <Type className="w-5 h-5 text-pink-600" />
                 </div>
-                <h3 className="font-bold mb-1 text-slate-800 text-sm">文字渲染</h3>
+                <h3 className="font-bold mb-1 text-slate-800 text-sm">字符画转图片</h3>
                 <p className="text-slate-500 text-xs leading-relaxed">
-                  支持多行文本、字体选择、粗细、间距、对齐等精细控制
+                  用小字符填充大字符形状，直接渲染为高清图片
                 </p>
               </div>
               <div className="feature-card p-4 animate-fade-in-up animation-delay-200">
@@ -1141,7 +1247,7 @@ export default function ImagePage() {
                 </div>
                 <h3 className="font-bold mb-1 text-slate-800 text-sm">像素微调</h3>
                 <p className="text-slate-500 text-xs leading-relaxed">
-                  画笔、橡皮擦、取色器，放大后逐像素编辑，追求完美细节
+                  画笔、橡皮擦、取色器，放大后逐像素编辑
                 </p>
               </div>
               <div className="feature-card p-4 animate-fade-in-up animation-delay-300">
@@ -1150,7 +1256,7 @@ export default function ImagePage() {
                 </div>
                 <h3 className="font-bold mb-1 text-slate-800 text-sm">高清导出</h3>
                 <p className="text-slate-500 text-xs leading-relaxed">
-                  导出 PNG 格式，保留所有编辑内容，所见即所得
+                  导出 PNG 格式，包含所有编辑内容
                 </p>
               </div>
             </div>
