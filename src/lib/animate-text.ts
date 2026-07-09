@@ -73,7 +73,7 @@ export class AnimatedBigText {
 
   private raf = 0
   private running = false
-  private reducedMotion = false
+  private startTime = 0
 
   constructor(canvas: HTMLCanvasElement, opts: AnimateOptions) {
     this.canvas = canvas
@@ -81,9 +81,6 @@ export class AnimatedBigText {
     if (!ctx) throw new Error("2D context unavailable")
     this.ctx = ctx
     this.opts = opts
-    if (typeof window !== "undefined" && window.matchMedia) {
-      this.reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches
-    }
   }
 
   setOptions(patch: Partial<AnimateOptions>) {
@@ -206,9 +203,11 @@ export class AnimatedBigText {
   start() {
     if (this.running) return
     this.running = true
+    this.startTime = typeof performance !== "undefined" ? performance.now() : Date.now()
     const loop = (now: number) => {
       if (!this.running) return
-      this.drawFrame(now / 1000)
+      const t = (now - this.startTime) / 1000
+      this.drawFrame(t)
       this.raf = requestAnimationFrame(loop)
     }
     this.raf = requestAnimationFrame(loop)
@@ -261,7 +260,7 @@ export class AnimatedBigText {
       ctx.fillText(this.charList[cell.base % this.charList.length], cx, cy)
     }
 
-    const t = this.reducedMotion ? 0 : tSec
+    const t = tSec
     const omega = (2 * Math.PI) / o.duration
     const list = this.charList
     const hi = o.scale // max scale (强度)
