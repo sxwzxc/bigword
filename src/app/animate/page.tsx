@@ -393,7 +393,7 @@ export default function AnimatePage() {
                 </div>
                 <p className="mt-3 text-xs text-slate-400 flex items-center gap-1">
                   <ImageIcon className="w-3.5 h-3.5" />
-                  提示：每个暗格的小字由 requestAnimationFrame 逐帧绘制。底层有一层静止暗字保证大形状（B）始终清晰。「纵向滚动(像素)」用裁剪 + 连续亚像素偏移让素材字在格内平滑滚动；「随机飘动」让每个 A 在格内用双正弦伪随机游动并同步缩放，像在 B 内随机撞击（试试调大「强度」让幅度更夸张）。
+                  提示：每个暗格的小字由 requestAnimationFrame 逐帧绘制。底层有一层静止暗字保证大形状（B）始终清晰。「纵向滚动(像素)」用裁剪 + 连续亚像素偏移让素材字在格内平滑滚动；「随机飘动」把每个 A 当作一个粒子，最左边的小字能一路飘到最右边，在整个大文字范围内自由游动、撞到 B 的内壁就反弹，同时各自缩放（试试调大「强度」让缩放更夸张、调小「速度」让飘得更慢）。
                 </p>
               </div>
             </div>

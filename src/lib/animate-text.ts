@@ -60,12 +60,28 @@ interface Cell {
 interface CellSeed {
   phase: number // pulse / blink phase
   spd: number // pulse / blink frequency multiplier
-  px: number // drift phase X
-  py: number // drift phase Y
-  fx: number // drift frequency X
-  fy: number // drift frequency Y
+  px: number // drift initial angle
+  py: number // (unused, kept for seed parity)
+  fx: number // (unused, kept for seed parity)
+  fy: number // (unused, kept for seed parity)
   ps: number // drift scale phase
   fs: number // drift scale frequency
+}
+
+/**
+ * A roaming dot for the "drift" effect. Positions are stored in GRID units
+ * (col/row space, 0..cols / 0..rows) so they survive canvas resizes. Each dot
+ * wanders freely across the WHOLE big shape and bounces off its walls, like a
+ * ball bouncing inside the letter.
+ */
+interface Particle {
+  gx: number
+  gy: number
+  vx: number // unit direction X (flipped on wall bounce)
+  vy: number // unit direction Y
+  ps: number // scale phase
+  fs: number // scale frequency
+  base: number // source char index
 }
 
 export class AnimatedBigText {
@@ -81,6 +97,9 @@ export class AnimatedBigText {
   private cells: Cell[] = []
   private charList: string[] = []
   private seeds: CellSeed[] = []
+  private mask: boolean[][] = [] // dark-cell grid (true = inside the big shape)
+  private particles: Particle[] = [] // roaming dots for the "drift" effect
+  private lastT = 0 // previous frame time (for dt in the drift simulation)
   private sourceAspect = 1 // source char height / width
 
   private raf = 0
@@ -202,6 +221,27 @@ export class AnimatedBigText {
       }
     })
 
+    // Dark-cell mask (grid of booleans) — used by the drift simulation to
+    // keep each roaming dot INSIDE the big shape (it bounces off the walls).
+    this.mask = Array.from({ length: this.rows }, () => new Array<boolean>(this.cols).fill(false))
+    for (const cell of this.cells) this.mask[cell.row][cell.col] = true
+
+    // One roaming particle per dark cell; starts at its home cell centre with
+    // a random direction. The drift simulation moves these across the WHOLE
+    // shape (not confined to the cell), bouncing off the shape's walls.
+    this.particles = this.cells.map((cell, i) => {
+      const ang = this.seeds[i].px
+      return {
+        gx: cell.col + 0.5,
+        gy: cell.row + 0.5,
+        vx: Math.cos(ang),
+        vy: Math.sin(ang),
+        ps: this.seeds[i].ps,
+        fs: this.seeds[i].fs,
+        base: cell.base,
+      }
+    })
+
     this.layout()
   }
 
@@ -242,9 +282,90 @@ export class AnimatedBigText {
     this.raf = 0
   }
 
-  private rainbowColor(t: number, cell: Cell): string {
-    const hue = (t * (90 / this.opts.duration) + (cell.col + cell.row) * 7) % 360
+  private rainbowColor(t: number, col: number, row: number): string {
+    const hue = (t * (90 / this.opts.duration) + (col + row) * 7) % 360
     return `hsl(${(hue + 360) % 360}, 85%, 62%)`
+  }
+
+  /** Is the grid-space point (gx, gy) inside the big shape? */
+  private inMaskCell(gx: number, gy: number): boolean {
+    const c = Math.floor(gx)
+    const r = Math.floor(gy)
+    return r >= 0 && r < this.rows && c >= 0 && c < this.cols && this.mask[r][c]
+  }
+
+  /**
+   * "Random drift" effect: every small A is a particle that roams freely
+   * across the ENTIRE big shape and bounces off its inner walls (like a ball
+   * bouncing inside the letter), while each one independently scales up/down.
+   * Positions are in grid units, so resizing the canvas stays correct.
+   */
+  private drawDrift(t: number) {
+    const o = this.opts
+    const ctx = this.ctx
+    const cellW = this.cssW / this.cols
+    const cellH = this.cssH / this.rows
+    const baseFont = Math.min(cellW, cellH) * 0.82
+    const isRainbow = o.anim === "rainbow"
+    const omega = (2 * Math.PI) / o.duration
+    const list = this.charList
+    const hi = o.scale
+    const lo = Math.max(0.3, 2 - hi)
+
+    let dt = this.lastT === 0 ? 0.016 : t - this.lastT
+    this.lastT = t
+    if (!(dt > 0) || dt > 0.1) dt = 0.016
+
+    // Roaming speed in grid-cells per second, tied to the "speed" slider.
+    const gs = this.cols * 0.18 * (1.6 / o.duration)
+
+    ctx.font = `bold ${baseFont}px ${o.sourceFontStack}`
+    ctx.textAlign = "center"
+    ctx.textBaseline = "middle"
+
+    for (const p of this.particles) {
+      const moveX = p.vx * gs * dt
+      const moveY = p.vy * gs * dt
+      const steps = Math.max(1, Math.ceil(Math.max(Math.abs(moveX), Math.abs(moveY)) / 0.5))
+      const sx = moveX / steps
+      const sy = moveY / steps
+      for (let s = 0; s < steps; s++) {
+        const inX = this.inMaskCell(p.gx + sx, p.gy)
+        const inY = this.inMaskCell(p.gx, p.gy + sy)
+        const inBoth = this.inMaskCell(p.gx + sx, p.gy + sy)
+        if (inBoth) {
+          p.gx += sx
+          p.gy += sy
+        } else {
+          // Hit a wall of the big shape → reflect the offending axis(es) and
+          // nudge the direction a little so the motion looks chaotic.
+          if (inX) { p.gx += sx; p.vy = -p.vy }
+          if (inY) { p.gy += sy; p.vx = -p.vx }
+          if (!inX && !inY) { p.vx = -p.vx; p.vy = -p.vy }
+          const a = (Math.random() - 0.5) * 0.7
+          const ca = Math.cos(a)
+          const sa = Math.sin(a)
+          const nvx = p.vx * ca - p.vy * sa
+          const nvy = p.vx * sa + p.vy * ca
+          p.vx = nvx
+          p.vy = nvy
+          break
+        }
+      }
+
+      const cx = p.gx * cellW
+      const cy = p.gy * cellH
+      const k = 0.5 + 0.5 * Math.sin(t * omega * p.fs + p.ps)
+      const scale = lo + (hi - lo) * k
+      ctx.save()
+      ctx.translate(cx, cy)
+      if (scale !== 1) ctx.scale(scale, scale)
+      ctx.fillStyle = isRainbow
+        ? this.rainbowColor(t, Math.floor(p.gx), Math.floor(p.gy))
+        : o.textColor
+      ctx.fillText(list[p.base % list.length], 0, 0)
+      ctx.restore()
+    }
   }
 
   private withAlpha(hex: string, a: number): string {
@@ -289,6 +410,13 @@ export class AnimatedBigText {
     const hi = o.scale // max scale (强度)
     const lo = Math.max(0.3, 2 - hi) // min scale, so the character stays visible
 
+    // Drift is a particle simulation handled entirely on its own (dots roam
+    // the whole big shape), so skip the per-cell loop below.
+    if (o.anim === "drift") {
+      this.drawDrift(t)
+      return
+    }
+
     ctx.font = `bold ${baseFont}px ${o.sourceFontStack}`
 
     for (let i = 0; i < this.cells.length; i++) {
@@ -296,7 +424,7 @@ export class AnimatedBigText {
       const seed = this.seeds[i]
       const cx = (cell.col + 0.5) * cellW
       const cy = (cell.row + 0.5) * cellH
-      let dx = 0
+      const dx = 0
       let dy = 0
       let scale = 1
       let alpha = 1
@@ -327,43 +455,12 @@ export class AnimatedBigText {
           ctx.rect(cx - cellW / 2, cy - cellH / 2, cellW, cellH)
           ctx.clip()
           ctx.globalAlpha = alpha
-          ctx.fillStyle = isRainbow ? this.rainbowColor(t, cell) : o.textColor
+          ctx.fillStyle = isRainbow ? this.rainbowColor(t, cell.col, cell.row) : o.textColor
           for (let m = mLo; m <= mHi; m++) {
             const y = cy + m * lineH - off
             const idx = ((m % n) + n) % n
             ctx.fillText(list[idx], cx, y)
           }
-          ctx.restore()
-          continue
-        }
-        case "drift": {
-          // Small A randomly wanders inside its cell AND changes size at the
-          // same time (two summed sines per axis → pseudo-random path; the
-          // cell clip makes it read as "bouncing / colliding" inside B).
-          const amp = Math.max(0.4, (hi - 1) * 0.5 + 0.25)
-          dx =
-            cellW *
-            0.32 *
-            amp *
-            (0.6 * Math.sin(t * omega * seed.fx + seed.px) +
-              0.4 * Math.sin(t * omega * seed.fx * 1.9 + seed.px * 1.7))
-          dy =
-            cellH *
-            0.32 *
-            amp *
-            (0.6 * Math.sin(t * omega * seed.fy + seed.py) +
-              0.4 * Math.sin(t * omega * seed.fy * 1.7 + seed.py * 1.3))
-          const k = 0.5 + 0.5 * Math.sin(t * omega * seed.fs + seed.ps)
-          scale = lo + (hi - lo) * k
-          ctx.save()
-          ctx.beginPath()
-          ctx.rect(cx - cellW / 2, cy - cellH / 2, cellW, cellH)
-          ctx.clip()
-          ctx.globalAlpha = alpha
-          ctx.translate(cx + dx, cy + dy)
-          if (scale !== 1) ctx.scale(scale, scale)
-          ctx.fillStyle = isRainbow ? this.rainbowColor(t, cell) : o.textColor
-          ctx.fillText(ch, 0, 0)
           ctx.restore()
           continue
         }
@@ -382,7 +479,7 @@ export class AnimatedBigText {
       ctx.globalAlpha = alpha
       ctx.translate(cx + dx, cy + dy)
       if (scale !== 1) ctx.scale(scale, scale)
-      ctx.fillStyle = isRainbow ? this.rainbowColor(t, cell) : o.textColor
+      ctx.fillStyle = isRainbow ? this.rainbowColor(t, cell.col, cell.row) : o.textColor
       ctx.fillText(ch, 0, 0)
       ctx.restore()
     }
