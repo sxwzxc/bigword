@@ -11,7 +11,7 @@ import {
 import { Zap, Download, Shuffle, Sparkles, PenTool, Type, Image as ImageIcon } from "lucide-react"
 
 const ANIM_TYPES: { id: AnimKind; label: string }[] = [
-  { id: "pulse", label: "脉冲放大" },
+  { id: "pulse", label: "随机缩放" },
   { id: "wave", label: "波浪起伏" },
   { id: "scroll", label: "纵向滚动" },
   { id: "blink", label: "闪烁" },
@@ -23,14 +23,14 @@ const TEXT_COLORS = ["#fbbf24", "#38bdf8", "#34d399", "#f472b6", "#ffffff", "#fb
 const BG_COLORS = ["#0f172a", "#000000", "#1e1b4b", "#022c22", "#7c2d12", "#ffffff"]
 
 export default function AnimatePage() {
-  const [source, setSource] = useState("鳖鳖鳖")
-  const [target, setTarget] = useState("赖疙宝")
-  const [targetFontId, setTargetFontId] = useState("yahei")
-  const [sourceFontId, setSourceFontId] = useState("yahei")
-  const [density, setDensity] = useState(80)
+  const [source, setSource] = useState("A")
+  const [target, setTarget] = useState("B")
+  const [targetFontId, setTargetFontId] = useState("arial")
+  const [sourceFontId, setSourceFontId] = useState("arial")
+  const [density, setDensity] = useState(64)
   const [anim, setAnim] = useState<AnimKind>("pulse")
   const [duration, setDuration] = useState(1.6)
-  const [scale, setScale] = useState(1.5)
+  const [scale, setScale] = useState(1.7)
   const [textColor, setTextColor] = useState("#fbbf24")
   const [bgColor, setBgColor] = useState("#0f172a")
   const [stats, setStats] = useState({ cols: 0, rows: 0, count: 0 })
@@ -392,7 +392,7 @@ export default function AnimatePage() {
                 </div>
                 <p className="mt-3 text-xs text-slate-400 flex items-center gap-1">
                   <ImageIcon className="w-3.5 h-3.5" />
-                  提示：每个暗格小文字由 requestAnimationFrame 逐帧绘制，「脉冲放大」会让字实时缩放、「纵向滚动」让素材字在格内流动。
+                  提示：每个暗格的小字由 requestAnimationFrame 逐帧绘制。选「随机缩放」时，底层有一层静止暗字保证大形状始终清晰，亮色小字则在格内各自以随机相位/频率放大缩小、随时间持续变化（试试调大「强度」）。
                 </p>
               </div>
             </div>

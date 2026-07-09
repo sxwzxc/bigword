@@ -68,6 +68,7 @@ export class AnimatedBigText {
   private rows = 0
   private cells: Cell[] = []
   private charList: string[] = []
+  private seeds: { phase: number; spd: number }[] = []
   private sourceAspect = 1 // source char height / width
 
   private raf = 0
@@ -170,6 +171,17 @@ export class AnimatedBigText {
     const list = [...o.source].filter((ch) => ch.trim().length > 0)
     this.charList = list.length ? list : ["●"]
 
+    // Deterministic per-cell random seeds (phase + speed) so each small
+    // character scales on its own, independently of its neighbours.
+    this.seeds = this.cells.map((cell) => {
+      const s = (cell.col * 73856093) ^ (cell.row * 19349663)
+      const h = (s >>> 0) % 100000
+      return {
+        phase: (h / 100000) * Math.PI * 2,
+        spd: 0.6 + ((h >> 7) % 1000) / 1000 * 0.9,
+      }
+    })
+
     this.layout()
   }
 
@@ -208,12 +220,18 @@ export class AnimatedBigText {
     this.raf = 0
   }
 
-  private colorFor(cell: Cell, t: number): string {
-    if (this.opts.anim === "rainbow") {
-      const hue = (t * (90 / this.opts.duration) + (cell.col + cell.row) * 7) % 360
-      return `hsl(${(hue + 360) % 360}, 85%, 62%)`
-    }
-    return this.opts.textColor
+  private rainbowColor(t: number, cell: Cell): string {
+    const hue = (t * (90 / this.opts.duration) + (cell.col + cell.row) * 7) % 360
+    return `hsl(${(hue + 360) % 360}, 85%, 62%)`
+  }
+
+  private withAlpha(hex: string, a: number): string {
+    let h = hex.replace("#", "")
+    if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2]
+    const r = parseInt(h.slice(0, 2), 16)
+    const g = parseInt(h.slice(2, 4), 16)
+    const b = parseInt(h.slice(4, 6), 16)
+    return `rgba(${r}, ${g}, ${b}, ${a})`
   }
 
   drawFrame(tSec: number) {
@@ -228,17 +246,32 @@ export class AnimatedBigText {
 
     const cellW = this.cssW / this.cols
     const cellH = this.cssH / this.rows
-    const fontPx = Math.min(cellW, cellH) * 0.92
-    ctx.font = `bold ${fontPx}px ${o.sourceFontStack}`
+    const baseFont = Math.min(cellW, cellH) * 0.82
     ctx.textAlign = "center"
     ctx.textBaseline = "middle"
+
+    // Faint static base layer: keeps the big shape (B) readable at all times,
+    // so the bright animated characters read as "small A's living inside B".
+    const isRainbow = o.anim === "rainbow"
+    ctx.font = `bold ${baseFont * 0.32}px ${o.sourceFontStack}`
+    ctx.fillStyle = isRainbow ? "rgba(255,255,255,0.12)" : this.withAlpha(o.textColor, 0.14)
+    for (const cell of this.cells) {
+      const cx = (cell.col + 0.5) * cellW
+      const cy = (cell.row + 0.5) * cellH
+      ctx.fillText(this.charList[cell.base % this.charList.length], cx, cy)
+    }
 
     const t = this.reducedMotion ? 0 : tSec
     const omega = (2 * Math.PI) / o.duration
     const list = this.charList
-    const amp = Math.max(0, o.scale - 1)
+    const hi = o.scale // max scale (强度)
+    const lo = Math.max(0.3, 2 - hi) // min scale, so the character stays visible
 
-    for (const cell of this.cells) {
+    ctx.font = `bold ${baseFont}px ${o.sourceFontStack}`
+
+    for (let i = 0; i < this.cells.length; i++) {
+      const cell = this.cells[i]
+      const seed = this.seeds[i]
       const cx = (cell.col + 0.5) * cellW
       const cy = (cell.row + 0.5) * cellH
       let dy = 0
@@ -246,22 +279,25 @@ export class AnimatedBigText {
       let alpha = 1
       let ch = list[cell.base % list.length]
 
-      const phase = (cell.col + cell.row) * 0.35
-
       switch (o.anim) {
-        case "pulse":
-          scale = 1 + amp * (0.5 + 0.5 * Math.sin(t * omega + phase))
+        case "pulse": {
+          // Each character breathes on its OWN random phase + frequency.
+          const k = 0.5 + 0.5 * Math.sin(t * omega * seed.spd + seed.phase)
+          scale = lo + (hi - lo) * k
           break
+        }
         case "wave":
-          dy = cellH * amp * 0.6 * Math.sin(t * omega + cell.col * 0.4)
+          dy = cellH * Math.max(0, hi - 1) * 0.6 * Math.sin(t * omega + cell.col * 0.4)
           break
         case "scroll":
           // characters flow vertically through each cell
           ch = list[Math.floor(t * (list.length / o.duration) + cell.row) % list.length]
           break
-        case "blink":
-          alpha = 0.2 + 0.8 * (0.5 + 0.5 * Math.sin(t * omega + phase))
+        case "blink": {
+          const k = 0.5 + 0.5 * Math.sin(t * omega * seed.spd + seed.phase)
+          alpha = 0.22 + 0.78 * k
           break
+        }
         case "rainbow":
         case "none":
         default:
@@ -272,7 +308,7 @@ export class AnimatedBigText {
       ctx.globalAlpha = alpha
       ctx.translate(cx, cy + dy)
       if (scale !== 1) ctx.scale(scale, scale)
-      ctx.fillStyle = this.colorFor(cell, t)
+      ctx.fillStyle = isRainbow ? this.rainbowColor(t, cell) : o.textColor
       ctx.fillText(ch, 0, 0)
       ctx.restore()
     }
