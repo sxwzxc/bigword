@@ -168,8 +168,8 @@ export function measureCellMetrics(fontStack: string, hasCJK: boolean): CellMetr
 
 /* ============================================================
    Rasterize target text → dark/light grid via canvas sampling.
-   Shared by both generateBigWord (string output) and
-   buildAnimatedCells (per-cell output).
+   Used by generateBigWord (string output for the character-art page).
+   The animated page (src/app/animate) has its own independent rasterizer.
    ============================================================ */
 
 export interface RasterResult {
@@ -349,68 +349,3 @@ export function generateBigWord(
   return out.join("\n")
 }
 
-/* ============================================================
-   Animated variant: returns the rasterized grid as a 2D array of
-   cells so each character can be rendered as its own <span> and
-   animated independently. `dark` cells carry a source character;
-   `light` cells carry the empty filler.
-   ============================================================ */
-
-export interface AnimCell {
-  ch: string
-  dark: boolean
-}
-
-export interface AnimGrid {
-  rows: number
-  cols: number
-  cells: AnimCell[][]
-  charCount: number
-}
-
-export function buildAnimatedCells(
-  source: string,
-  target: string,
-  targetFontStack: string,
-  metrics: CellMetrics,
-  targetBaseSize: number,
-  hasCJK: boolean,
-): AnimGrid {
-  const tgt = target
-  if (source.length === 0 || tgt.trim().length === 0) {
-    return { rows: 0, cols: 0, cells: [], charCount: 0 }
-  }
-
-  const baseFont = Math.max(40, targetBaseSize)
-  const { darkGrid, cols, rows } = rasterizeTarget(tgt, targetFontStack, baseFont, metrics.charAspect)
-
-  const convertChar = (ch: string): string => hasCJK ? toFullwidth(ch) : ch
-  const src = [...source].map(convertChar)
-  let idx = 0
-
-  const cells: AnimCell[][] = []
-  for (let r = 0; r < rows; r++) {
-    const row: AnimCell[] = []
-    for (let c = 0; c < cols; c++) {
-      if (darkGrid[r][c]) {
-        row.push({ ch: src[idx % src.length], dark: true })
-        idx++
-      } else {
-        row.push({ ch: metrics.emptyChar, dark: false })
-      }
-    }
-    cells.push(row)
-  }
-
-  // Trim trailing empty cells per row (mirror generateBigWord's rstrip).
-  for (const row of cells) {
-    let last = row.length - 1
-    while (last >= 0 && !row[last].dark) last--
-    row.length = last + 1
-  }
-
-  const realCols = cells.reduce((m, row) => Math.max(m, row.length), 0)
-  const charCount = cells.reduce((sum, row) => sum + row.filter((c) => c.dark).length, 0)
-
-  return { rows: cells.length, cols: realCols, cells, charCount }
-}

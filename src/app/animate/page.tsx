@@ -1,95 +1,101 @@
 "use client"
 
-import { useState, useEffect, useMemo, useCallback, type CSSProperties } from "react"
+import { useState, useEffect, useRef, useCallback } from "react"
 import Link from "next/link"
 import {
-  BUILTIN_FONTS,
-  containsCJK,
-  measureCellMetrics,
-  buildAnimatedCells,
-  toFullwidth,
-  type AnimGrid,
-  type AnimCell,
-} from "@/lib/bigword"
-import { Zap, Copy, Download, Shuffle, Sparkles, PenTool, Type } from "lucide-react"
+  ANIMATE_FONTS,
+  AnimatedBigText,
+  type AnimKind,
+  type AnimateOptions,
+} from "@/lib/animate-text"
+import { Zap, Download, Shuffle, Sparkles, PenTool, Type, Image as ImageIcon } from "lucide-react"
 
-const ANIM_TYPES = [
+const ANIM_TYPES: { id: AnimKind; label: string }[] = [
   { id: "pulse", label: "脉冲放大" },
   { id: "wave", label: "波浪起伏" },
   { id: "scroll", label: "纵向滚动" },
   { id: "blink", label: "闪烁" },
   { id: "rainbow", label: "彩虹流光" },
-  { id: "none", label: "无动画" },
-] as const
+  { id: "none", label: "静态" },
+]
 
-type AnimTypeId = (typeof ANIM_TYPES)[number]["id"]
+const TEXT_COLORS = ["#fbbf24", "#38bdf8", "#34d399", "#f472b6", "#ffffff", "#fb7185"]
+const BG_COLORS = ["#0f172a", "#000000", "#1e1b4b", "#022c22", "#7c2d12", "#ffffff"]
 
 export default function AnimatePage() {
   const [source, setSource] = useState("鳖鳖鳖")
   const [target, setTarget] = useState("赖疙宝")
   const [targetFontId, setTargetFontId] = useState("yahei")
   const [sourceFontId, setSourceFontId] = useState("yahei")
-  const [targetBaseSize, setTargetBaseSize] = useState(180)
-  const [animType, setAnimType] = useState<AnimTypeId>("pulse")
+  const [density, setDensity] = useState(80)
+  const [anim, setAnim] = useState<AnimKind>("pulse")
   const [duration, setDuration] = useState(1.6)
+  const [scale, setScale] = useState(1.5)
   const [textColor, setTextColor] = useState("#fbbf24")
   const [bgColor, setBgColor] = useState("#0f172a")
-  const [grid, setGrid] = useState<AnimGrid>({ rows: 0, cols: 0, cells: [], charCount: 0 })
-  const [copied, setCopied] = useState(false)
+  const [stats, setStats] = useState({ cols: 0, rows: 0, count: 0 })
 
-  const allFonts = BUILTIN_FONTS
-  const targetFont = allFonts.find((f) => f.id === targetFontId) ?? BUILTIN_FONTS[0]
-  const sourceFont = allFonts.find((f) => f.id === sourceFontId) ?? BUILTIN_FONTS[0]
+  const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const engineRef = useRef<AnimatedBigText | null>(null)
 
-  const hasCJK = useMemo(() => containsCJK(source), [source])
-  const cellMetrics = useMemo(
-    () => measureCellMetrics(sourceFont.stack, hasCJK),
-    [sourceFont.stack, hasCJK],
+  const targetFont = ANIMATE_FONTS.find((f) => f.id === targetFontId) ?? ANIMATE_FONTS[0]
+  const sourceFont = ANIMATE_FONTS.find((f) => f.id === sourceFontId) ?? ANIMATE_FONTS[0]
+
+  const buildOpts = useCallback(
+    (): AnimateOptions => ({
+      source,
+      target,
+      targetFontStack: targetFont.stack,
+      sourceFontStack: sourceFont.stack,
+      density,
+      anim,
+      duration,
+      scale,
+      textColor,
+      bgColor,
+    }),
+    [source, target, targetFont.stack, sourceFont.stack, density, anim, duration, scale, textColor, bgColor],
   )
 
-  // Scroll strip: cap to keep DOM node count reasonable, repeat twice for seamless loop.
-  const scrollStrip = useMemo(() => {
-    const conv = [...source].map((ch) => (hasCJK ? toFullwidth(ch) : ch)).filter((c) => c.trim().length > 0)
-    const capped = conv.length > 0 ? conv.slice(0, 6) : ["●"]
-    return [...capped, ...capped]
-  }, [source, hasCJK])
-  const scrollLen = scrollStrip.length / 2
-
-  const recompute = useCallback(() => {
-    setGrid(
-      buildAnimatedCells(source, target, targetFont.stack, cellMetrics, targetBaseSize, hasCJK),
-    )
-  }, [source, target, targetFont.stack, cellMetrics, targetBaseSize, hasCJK])
-
+  // Mount: create engine, compute mask, start the rAF loop, observe resize.
   useEffect(() => {
-    recompute()
-  }, [recompute])
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const engine = new AnimatedBigText(canvas, buildOpts())
+    engineRef.current = engine
+    engine.compute()
+    setStats(engine.stats)
+    engine.start()
 
-  const toPlainText = useCallback(() => {
-    return grid.cells
-      .map((row) => row.map((c) => (c.dark ? c.ch : " ")).join(""))
-      .join("\n")
-  }, [grid])
+    const parent = canvas.parentElement
+    const ro = new ResizeObserver(() => engine.resize())
+    if (parent) ro.observe(parent)
 
-  const handleCopy = useCallback(async () => {
-    try {
-      await navigator.clipboard.writeText(toPlainText())
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1500)
-    } catch {
-      /* ignore */
+    return () => {
+      engine.stop()
+      ro.disconnect()
+      engineRef.current = null
     }
-  }, [toPlainText])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
-  const handleDownload = useCallback(() => {
-    const blob = new Blob([toPlainText()], { type: "text/plain;charset=utf-8" })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement("a")
-    a.href = url
-    a.download = `animated-${target || "bigword"}.txt`
-    a.click()
-    URL.revokeObjectURL(url)
-  }, [toPlainText, target])
+  // Recompute the mask only when geometry / text / fonts change.
+  useEffect(() => {
+    const engine = engineRef.current
+    if (!engine) return
+    engine.setOptions(buildOpts())
+    engine.compute()
+    setStats(engine.stats)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [source, target, targetFontId, sourceFontId, density])
+
+  // Live updates (no recompute) for animation parameters.
+  useEffect(() => {
+    const engine = engineRef.current
+    if (!engine) return
+    engine.setOptions(buildOpts())
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [anim, duration, scale, textColor, bgColor])
 
   const handleShuffle = useCallback(() => {
     const arr = [...source]
@@ -100,63 +106,18 @@ export default function AnimatePage() {
     setSource(arr.join(""))
   }, [source])
 
-  const renderCell = useCallback(
-    (cell: AnimCell, r: number, c: number) => {
-      if (!cell.dark) {
-        return (
-          <span key={c} className="asc-cell light">
-            {cell.ch}
-          </span>
-        )
-      }
-      const delay = ((r + c) % 24) * 0.05
+  const handleDownload = useCallback(() => {
+    const engine = engineRef.current
+    if (!engine) return
+    const url = engine.toPNG()
+    const a = document.createElement("a")
+    a.href = url
+    a.download = `动效字符-${target || "bigword"}.png`
+    a.click()
+  }, [target])
 
-      if (animType === "scroll") {
-        return (
-          <span key={c} className="asc-cell asc-scroll" style={{ color: textColor }}>
-            <span
-              className="asc-strip"
-              style={{
-                animationDuration: `${duration * 2}s`,
-                animationDelay: `${-delay}s`,
-                "--asc-len": scrollLen,
-              } as CSSProperties}
-            >
-              {scrollStrip.map((ch, i) => (
-                <span key={i} className="asc-strip-ch">
-                  {ch}
-                </span>
-              ))}
-            </span>
-          </span>
-        )
-      }
-
-      const cls =
-        animType === "pulse"
-          ? "asc-pulse"
-          : animType === "wave"
-            ? "asc-wave"
-            : animType === "blink"
-              ? "asc-blink"
-              : animType === "rainbow"
-                ? "asc-rainbow"
-                : ""
-
-      return (
-        <span
-          key={c}
-          className={`asc-cell dark ${cls}`}
-          style={{ color: textColor, animationDuration: `${duration}s`, animationDelay: `${delay}s` }}
-        >
-          {cell.ch}
-        </span>
-      )
-    },
-    [animType, duration, textColor, scrollStrip, scrollLen],
-  )
-
-  const tooMany = grid.charCount > 3500
+  const tooMany = stats.count > 6000
+  const empty = target.trim().length === 0
 
   return (
     <div className="min-h-screen">
@@ -177,7 +138,7 @@ export default function AnimatePage() {
               </div>
               <div>
                 <span className="font-extrabold text-base tracking-tight text-slate-900">动效字符</span>
-                <span className="text-xs text-slate-400 ml-1.5 hidden sm:inline">Animated</span>
+                <span className="text-xs text-slate-400 ml-1.5 hidden sm:inline">Canvas Animated</span>
               </div>
             </Link>
             <div className="w-px h-5 bg-slate-200" />
@@ -209,7 +170,9 @@ export default function AnimatePage() {
               动效字符
             </span>
           </h1>
-          <p className="mt-2 text-sm text-slate-500">用小文字拼出大文字，再给每个字加上动画 ✨</p>
+          <p className="mt-2 text-sm text-slate-500">
+            用 Canvas 实时渲染：小文字拼出大文字，每个字都有独立动画 ✨
+          </p>
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-[340px_1fr] gap-5">
@@ -225,10 +188,7 @@ export default function AnimatePage() {
                       素材文本
                     </span>
                     <div className="flex items-center gap-2">
-                      <span className="stat-chip">
-                        {[...source.replace(/\s+/g, "")].length}
-                      </span>
-                      {hasCJK && <span className="stat-chip" style={{ background: "#fef3c7", border: "#fde68a", color: "#92400e" }}>CJK</span>}
+                      <span className="stat-chip">{[...source.replace(/\s+/g, "")].length}</span>
                       <button
                         onClick={handleShuffle}
                         className="text-slate-400 hover:text-amber-500 transition-colors p-1.5 rounded-lg hover:bg-amber-50 cursor-pointer"
@@ -275,20 +235,20 @@ export default function AnimatePage() {
                   </div>
                 </div>
 
-                {/* Size */}
+                {/* Density */}
                 <div className="space-y-1">
                   <div className="flex items-center justify-between">
-                    <span className="text-xs font-semibold text-slate-500">字号 / 密度</span>
-                    <span className="stat-chip">{targetBaseSize}</span>
+                    <span className="text-xs font-semibold text-slate-500">密度（列数）</span>
+                    <span className="stat-chip">{density}</span>
                   </div>
                   <input
                     type="range"
                     className="tool-slider"
-                    min={80}
-                    max={400}
-                    step={10}
-                    value={targetBaseSize}
-                    onChange={(e) => setTargetBaseSize(Number(e.target.value))}
+                    min={40}
+                    max={160}
+                    step={2}
+                    value={density}
+                    onChange={(e) => setDensity(Number(e.target.value))}
                   />
                 </div>
 
@@ -299,8 +259,8 @@ export default function AnimatePage() {
                     {ANIM_TYPES.map((a) => (
                       <button
                         key={a.id}
-                        onClick={() => setAnimType(a.id)}
-                        className={`seg-btn ${animType === a.id ? "seg-btn-active" : ""}`}
+                        onClick={() => setAnim(a.id)}
+                        className={`seg-btn ${anim === a.id ? "seg-btn-active" : ""}`}
                       >
                         {a.label}
                       </button>
@@ -325,12 +285,29 @@ export default function AnimatePage() {
                   />
                 </div>
 
+                {/* Intensity (pulse / wave amplitude) */}
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold text-slate-500">强度（放大/起伏幅度）</span>
+                    <span className="stat-chip">{scale.toFixed(2)}×</span>
+                  </div>
+                  <input
+                    type="range"
+                    className="tool-slider"
+                    min={1}
+                    max={2.4}
+                    step={0.05}
+                    value={scale}
+                    onChange={(e) => setScale(Number(e.target.value))}
+                  />
+                </div>
+
                 {/* Colors */}
                 <div className="grid grid-cols-2 gap-3">
                   <div className="space-y-1">
                     <span className="text-xs font-semibold text-slate-500">文字颜色</span>
                     <div className="flex flex-wrap gap-2">
-                      {["#fbbf24", "#38bdf8", "#34d399", "#f472b6", "#ffffff"].map((c) => (
+                      {TEXT_COLORS.map((c) => (
                         <button
                           key={c}
                           onClick={() => setTextColor(c)}
@@ -344,7 +321,7 @@ export default function AnimatePage() {
                   <div className="space-y-1">
                     <span className="text-xs font-semibold text-slate-500">背景颜色</span>
                     <div className="flex flex-wrap gap-2">
-                      {["#0f172a", "#000000", "#1e1b4b", "#022c22", "#ffffff"].map((c) => (
+                      {BG_COLORS.map((c) => (
                         <button
                           key={c}
                           onClick={() => setBgColor(c)}
@@ -360,19 +337,12 @@ export default function AnimatePage() {
                 {/* Actions */}
                 <div className="flex gap-2 pt-1">
                   <button
-                    onClick={handleCopy}
-                    className="btn-primary flex-1 flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm cursor-pointer"
-                  >
-                    <Copy className="w-4 h-4" />
-                    {copied ? "已复制" : "复制"}
-                  </button>
-                  <button
                     onClick={handleDownload}
                     className="btn-primary flex-1 flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm cursor-pointer"
                     style={{ background: "linear-gradient(135deg,#f59e0b,#f97316)" }}
                   >
                     <Download className="w-4 h-4" />
-                    下载
+                    下载图片
                   </button>
                 </div>
               </div>
@@ -386,34 +356,44 @@ export default function AnimatePage() {
                 <div className="flex items-center justify-between mb-3">
                   <span className="label-pill">
                     <Zap className="w-3.5 h-3.5" />
-                    预览
+                    实时预览（Canvas 动画）
                   </span>
                   <div className="flex items-center gap-2">
-                    <span className="stat-chip">{grid.rows} 行</span>
-                    <span className="stat-chip">{grid.cols} 列</span>
-                    <span className="stat-chip">{grid.charCount} 字</span>
+                    <span className="stat-chip">{stats.rows} 行</span>
+                    <span className="stat-chip">{stats.cols} 列</span>
+                    <span className="stat-chip">{stats.count} 字</span>
                   </div>
                 </div>
                 {tooMany && (
                   <div className="edge-banner mb-3">
-                    单元格较多（{grid.charCount}），动画可能略卡。可在左侧降低「字号 / 密度」。
+                    单元格较多（{stats.count}），动画可能略卡。可在左侧降低「密度」。
                   </div>
                 )}
-                <div className="asc-wrap" style={{ background: bgColor, borderColor: bgColor === "#ffffff" ? "#e2e8f0" : "#1e293b" }}>
-                  <div className="asc-stage" style={{ background: bgColor }}>
-                    {grid.rows === 0 ? (
-                      <div className="preview-empty" style={{ color: bgColor === "#ffffff" ? "#94a3b8" : "#475569", minHeight: 280 }}>
-                        输入素材文本与目标文本即可生成动效字符
-                      </div>
-                    ) : (
-                      grid.cells.map((row, r) => (
-                        <div className="asc-line" key={r}>
-                          {row.map((cell, c) => renderCell(cell, r, c))}
-                        </div>
-                      ))
-                    )}
-                  </div>
+                <div
+                  className="preview-frame"
+                  style={{
+                    background: bgColor,
+                    borderColor: bgColor === "#ffffff" ? "#e2e8f0" : "#1e293b",
+                    borderRadius: 12,
+                    border: "1px solid",
+                    overflow: "hidden",
+                    position: "relative",
+                  }}
+                >
+                  <canvas ref={canvasRef} />
+                  {empty && (
+                    <div
+                      className="preview-empty"
+                      style={{ color: bgColor === "#ffffff" ? "#94a3b8" : "#64748b", minHeight: 280 }}
+                    >
+                      输入目标文本即可生成动效字符
+                    </div>
+                  )}
                 </div>
+                <p className="mt-3 text-xs text-slate-400 flex items-center gap-1">
+                  <ImageIcon className="w-3.5 h-3.5" />
+                  提示：每个暗格小文字由 requestAnimationFrame 逐帧绘制，「脉冲放大」会让字实时缩放、「纵向滚动」让素材字在格内流动。
+                </p>
               </div>
             </div>
           </div>
@@ -430,7 +410,7 @@ function FontSelect({ value, onChange }: { value: string; onChange: (v: string) 
       onChange={(e) => onChange(e.target.value)}
       className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-700 focus:outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 cursor-pointer"
     >
-      {BUILTIN_FONTS.map((f) => (
+      {ANIMATE_FONTS.map((f) => (
         <option key={f.id} value={f.id}>
           {f.label}
         </option>
