@@ -510,3 +510,125 @@ body {
 .font-picker-list::-webkit-scrollbar-thumb,
 .preview-wrap::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
 .preview-wrap::-webkit-scrollbar-thumb { background: #334155; }
+
+/* ============================================
+   Animated Word (动效字符)
+   ============================================ */
+
+.asc-wrap {
+  background: #0f172a;
+  border: 1px solid #1e293b;
+  border-radius: 12px;
+  overflow: auto;
+  position: relative;
+}
+
+.asc-stage {
+  display: inline-block;
+  min-width: 100%;
+  padding: 24px;
+}
+
+.asc-line {
+  white-space: pre;
+  line-height: 1;
+  letter-spacing: 0;
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+  font-weight: 700;
+  font-feature-settings: "liga" 0, "calt" 0, "kern" 0;
+  font-variant-ligatures: none;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: geometricPrecision;
+}
+
+.asc-cell {
+  display: inline-block;
+  position: relative;
+  white-space: pre;
+  transform-origin: center center;
+}
+
+.asc-cell.light {
+  color: transparent;
+}
+
+/* --- animation keyframes --- */
+@keyframes asc-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(var(--asc-scale, 1.6)); }
+}
+
+@keyframes asc-wave {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(calc(-1 * var(--asc-amp, 0.3em))); }
+}
+
+@keyframes asc-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: var(--asc-min, 0.18); }
+}
+
+@keyframes asc-rainbow {
+  from { filter: hue-rotate(0deg); }
+  to { filter: hue-rotate(360deg); }
+}
+
+@keyframes asc-scroll {
+  from { transform: translateY(0); }
+  to { transform: translateY(calc(-1em * var(--asc-len, 3))); }
+}
+
+.asc-pulse {
+  animation-name: asc-pulse;
+  animation-iteration-count: infinite;
+  animation-timing-function: ease-in-out;
+}
+
+.asc-wave {
+  animation-name: asc-wave;
+  animation-iteration-count: infinite;
+  animation-timing-function: ease-in-out;
+}
+
+.asc-blink {
+  animation-name: asc-blink;
+  animation-iteration-count: infinite;
+  animation-timing-function: ease-in-out;
+}
+
+.asc-rainbow {
+  animation-name: asc-rainbow;
+  animation-iteration-count: infinite;
+  animation-timing-function: linear;
+}
+
+/* --- vertical scroll cell --- */
+.asc-scroll {
+  display: inline-block;
+  height: 1em;
+  line-height: 1;
+  overflow: hidden;
+  vertical-align: bottom;
+}
+
+.asc-strip {
+  display: block;
+  animation-name: asc-scroll;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+  will-change: transform;
+}
+
+.asc-strip-ch {
+  display: block;
+  height: 1em;
+  line-height: 1;
+  text-align: center;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .asc-pulse, .asc-wave, .asc-blink, .asc-rainbow, .asc-strip {
+    animation: none !important;
+  }
+}
