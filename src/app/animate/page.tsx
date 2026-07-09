@@ -13,7 +13,8 @@ import { Zap, Download, Shuffle, Sparkles, PenTool, Type, Image as ImageIcon } f
 const ANIM_TYPES: { id: AnimKind; label: string }[] = [
   { id: "pulse", label: "随机缩放" },
   { id: "wave", label: "波浪起伏" },
-  { id: "scroll", label: "纵向滚动" },
+  { id: "scroll", label: "纵向滚动(像素)" },
+  { id: "drift", label: "随机飘动" },
   { id: "blink", label: "闪烁" },
   { id: "rainbow", label: "彩虹流光" },
   { id: "none", label: "静态" },
@@ -392,7 +393,7 @@ export default function AnimatePage() {
                 </div>
                 <p className="mt-3 text-xs text-slate-400 flex items-center gap-1">
                   <ImageIcon className="w-3.5 h-3.5" />
-                  提示：每个暗格的小字由 requestAnimationFrame 逐帧绘制。选「随机缩放」时，底层有一层静止暗字保证大形状始终清晰，亮色小字则在格内各自以随机相位/频率放大缩小、随时间持续变化（试试调大「强度」）。
+                  提示：每个暗格的小字由 requestAnimationFrame 逐帧绘制。底层有一层静止暗字保证大形状（B）始终清晰。「纵向滚动(像素)」用裁剪 + 连续亚像素偏移让素材字在格内平滑滚动；「随机飘动」让每个 A 在格内用双正弦伪随机游动并同步缩放，像在 B 内随机撞击（试试调大「强度」让幅度更夸张）。
                 </p>
               </div>
             </div>

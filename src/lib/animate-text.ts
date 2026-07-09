@@ -7,7 +7,7 @@
 //  inside a requestAnimationFrame loop so every cell can be animated.
 // ============================================================
 
-export type AnimKind = "pulse" | "wave" | "scroll" | "blink" | "rainbow" | "none"
+export type AnimKind = "pulse" | "wave" | "scroll" | "blink" | "rainbow" | "drift" | "none"
 
 export interface FontDef {
   id: string
@@ -56,6 +56,18 @@ interface Cell {
   base: number // index into source char list (static fallback)
 }
 
+/** Deterministic per-cell random parameters driving the animations. */
+interface CellSeed {
+  phase: number // pulse / blink phase
+  spd: number // pulse / blink frequency multiplier
+  px: number // drift phase X
+  py: number // drift phase Y
+  fx: number // drift frequency X
+  fy: number // drift frequency Y
+  ps: number // drift scale phase
+  fs: number // drift scale frequency
+}
+
 export class AnimatedBigText {
   private canvas: HTMLCanvasElement
   private ctx: CanvasRenderingContext2D
@@ -68,7 +80,7 @@ export class AnimatedBigText {
   private rows = 0
   private cells: Cell[] = []
   private charList: string[] = []
-  private seeds: { phase: number; spd: number }[] = []
+  private seeds: CellSeed[] = []
   private sourceAspect = 1 // source char height / width
 
   private raf = 0
@@ -168,14 +180,25 @@ export class AnimatedBigText {
     const list = [...o.source].filter((ch) => ch.trim().length > 0)
     this.charList = list.length ? list : ["●"]
 
-    // Deterministic per-cell random seeds (phase + speed) so each small
-    // character scales on its own, independently of its neighbours.
+    // Deterministic per-cell random seeds so each small character animates
+    // on its own, independently of its neighbours. Derived from a stable
+    // hash of the cell coordinates (no Math.random → reproducible).
     this.seeds = this.cells.map((cell) => {
       const s = (cell.col * 73856093) ^ (cell.row * 19349663)
-      const h = (s >>> 0) % 100000
+      const h = s >>> 0
+      const rnd = (n: number) => {
+        const v = Math.sin(h * 0.0001 + n * 2.137) * 43758.5453
+        return v - Math.floor(v)
+      }
       return {
-        phase: (h / 100000) * Math.PI * 2,
-        spd: 0.6 + ((h >> 7) % 1000) / 1000 * 0.9,
+        phase: rnd(1) * Math.PI * 2,
+        spd: 0.6 + rnd(2) * 0.9,
+        px: rnd(3) * Math.PI * 2,
+        py: rnd(4) * Math.PI * 2,
+        fx: 0.7 + rnd(5) * 1.1,
+        fy: 0.7 + rnd(6) * 1.1,
+        ps: rnd(7) * Math.PI * 2,
+        fs: 0.8 + rnd(8) * 1.2,
       }
     })
 
@@ -273,10 +296,11 @@ export class AnimatedBigText {
       const seed = this.seeds[i]
       const cx = (cell.col + 0.5) * cellW
       const cy = (cell.row + 0.5) * cellH
+      let dx = 0
       let dy = 0
       let scale = 1
       let alpha = 1
-      let ch = list[cell.base % list.length]
+      const ch = list[cell.base % list.length]
 
       switch (o.anim) {
         case "pulse": {
@@ -288,10 +312,61 @@ export class AnimatedBigText {
         case "wave":
           dy = cellH * Math.max(0, hi - 1) * 0.6 * Math.sin(t * omega + cell.col * 0.4)
           break
-        case "scroll":
-          // characters flow vertically through each cell
-          ch = list[Math.floor(t * (list.length / o.duration) + cell.row) % list.length]
-          break
+        case "scroll": {
+          // PIXEL-LEVEL vertical scroll: a clipped stream of source chars
+          // translated by a continuous sub-pixel offset (no character swaps).
+          const lineH = baseFont * 0.95
+          const n = list.length
+          const total = lineH * n
+          let off = (t * (total / o.duration)) % total
+          if (off < 0) off += total
+          const mLo = Math.floor((off - cellH / 2) / lineH) - 1
+          const mHi = Math.ceil((off + cellH / 2) / lineH) + 1
+          ctx.save()
+          ctx.beginPath()
+          ctx.rect(cx - cellW / 2, cy - cellH / 2, cellW, cellH)
+          ctx.clip()
+          ctx.globalAlpha = alpha
+          ctx.fillStyle = isRainbow ? this.rainbowColor(t, cell) : o.textColor
+          for (let m = mLo; m <= mHi; m++) {
+            const y = cy + m * lineH - off
+            const idx = ((m % n) + n) % n
+            ctx.fillText(list[idx], cx, y)
+          }
+          ctx.restore()
+          continue
+        }
+        case "drift": {
+          // Small A randomly wanders inside its cell AND changes size at the
+          // same time (two summed sines per axis → pseudo-random path; the
+          // cell clip makes it read as "bouncing / colliding" inside B).
+          const amp = Math.max(0.4, (hi - 1) * 0.5 + 0.25)
+          dx =
+            cellW *
+            0.32 *
+            amp *
+            (0.6 * Math.sin(t * omega * seed.fx + seed.px) +
+              0.4 * Math.sin(t * omega * seed.fx * 1.9 + seed.px * 1.7))
+          dy =
+            cellH *
+            0.32 *
+            amp *
+            (0.6 * Math.sin(t * omega * seed.fy + seed.py) +
+              0.4 * Math.sin(t * omega * seed.fy * 1.7 + seed.py * 1.3))
+          const k = 0.5 + 0.5 * Math.sin(t * omega * seed.fs + seed.ps)
+          scale = lo + (hi - lo) * k
+          ctx.save()
+          ctx.beginPath()
+          ctx.rect(cx - cellW / 2, cy - cellH / 2, cellW, cellH)
+          ctx.clip()
+          ctx.globalAlpha = alpha
+          ctx.translate(cx + dx, cy + dy)
+          if (scale !== 1) ctx.scale(scale, scale)
+          ctx.fillStyle = isRainbow ? this.rainbowColor(t, cell) : o.textColor
+          ctx.fillText(ch, 0, 0)
+          ctx.restore()
+          continue
+        }
         case "blink": {
           const k = 0.5 + 0.5 * Math.sin(t * omega * seed.spd + seed.phase)
           alpha = 0.22 + 0.78 * k
@@ -305,7 +380,7 @@ export class AnimatedBigText {
 
       ctx.save()
       ctx.globalAlpha = alpha
-      ctx.translate(cx, cy + dy)
+      ctx.translate(cx + dx, cy + dy)
       if (scale !== 1) ctx.scale(scale, scale)
       ctx.fillStyle = isRainbow ? this.rainbowColor(t, cell) : o.textColor
       ctx.fillText(ch, 0, 0)
